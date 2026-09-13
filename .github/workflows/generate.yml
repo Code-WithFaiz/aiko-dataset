@@ -1,4 +1,3 @@
-# .github/workflows/generate.yml
 name: Aiko Dataset Generator
 
 on:
@@ -6,14 +5,10 @@ on:
     - cron: "*/5 * * * *"
   workflow_dispatch: {}
 
-concurrency:
-  group: aiko-generate
-  cancel-in-progress: false
-
 jobs:
   generate:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4

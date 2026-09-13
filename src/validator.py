@@ -22,16 +22,14 @@ logger = logging.getLogger(__name__)
 
 # --- CRITICAL: respectful address (client requirement) ---
 FORBIDDEN_ADDRESS_WORDS = [
-    "tum", "tu", "tera", "teri", "tere", "tujhe", "tujhko", "tumko",
-    "tumhara", "tumhari", "tumhare", "tumse", "tujhse", "tumne", "tumna",
-    "tumhi", "tujhme", "tumme", "tumpar", "tujhpar", "tumpe", "tujhpe",
+    "tumra", "tera", "raa", "tum chup reho", "tuuna", "baa", "saala", "chup"
 ]
 
 # --- CRITICAL: Aiko must never claim to be AI ---
 AI_REFERENCE_PHRASES = [
     "main ek ai", "main ai hoon", "i am an ai", "i am ai",
     "main assistant", "main ek assistant", "main robot",
-    "chatgpt", "language model", "main bot",
+    "i am a Ai bot" , "language model", "main bot", "ma eak robot huu", "sorry i can't help", "hii how can i assist you",
 ]
 
 # --- CRITICAL: only the worst slurs (common slang words like "saala"/"saali"
@@ -48,6 +46,7 @@ REFUSAL_PHRASES = [
     "main nahi kar sakti",
     "baat nahi karungi",
     "sorry, main ye nahi kar sakti",
+    "ma to nahi karna wali"
 ]
 
 NARRATOR_PATTERN = re.compile(r"\*[^*]+\*")

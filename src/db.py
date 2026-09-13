@@ -19,13 +19,16 @@ from pymongo import ASCENDING, MongoClient, ReturnDocument, UpdateOne
 from pymongo.collection import Collection
 from pymongo.database import Database
 from pymongo.errors import PyMongoError
+import random
 
 logger = logging.getLogger(__name__)
 
 _client: Optional[MongoClient] = None
 _db: Optional[Database] = None
 
-RUN_LOCK_TTL_SECONDS = 15 * 60  # matches workflow timeout
+
+RUN_LOCK_SLOTS = ["1", "2", "3", "4"]
+RUN_LOCK_TTL_SECONDS = 30 * 60
 SIGNATURE_BUFFER_CAP = 5000
 SCENARIO_BUFFER_CAP = 50
 OPENER_BUFFER_CAP = 200
@@ -64,59 +67,54 @@ def _ensure_indexes(db: Database) -> None:
 # ---------- Run lock (concurrency safety) ----------
 
 def acquire_run_lock() -> Optional[str]:
-    """Try to take the run lock. Returns a run_id if acquired, else None.
-
-    Uses a naive-UTC timestamp (MongoDB strips timezone info anyway)
-    and a manual check-then-update pattern to avoid upsert+filter
-    conflicts that cause DuplicateKeyError.
-    """
+    """Try any of the 4 slots. Returns lock_id if acquired, else None."""
     db = get_db()
     run_id = uuid.uuid4().hex
-    now = datetime.now(timezone.utc).replace(tzinfo=None)  # naive UTC
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     expires_at = now + timedelta(seconds=RUN_LOCK_TTL_SECONDS)
 
-    existing = db.run_lock.find_one({"_id": "run_lock"})
+    slots = list(RUN_LOCK_SLOTS)
+    random.shuffle(slots)
 
-    if existing is None:
-        # No lock yet — try to create one.
-        try:
-            db.run_lock.insert_one(
-                {
-                    "_id": "run_lock",
+    for slot in slots:
+        lock_id = f"run_lock_{slot}"
+        existing = db.run_lock.find_one({"_id": lock_id})
+
+        if existing is None:
+            try:
+                db.run_lock.insert_one({
+                    "_id": lock_id,
                     "holder": run_id,
                     "expires_at": expires_at,
                     "started_at": now,
-                }
-            )
-            logger.info("Run lock acquired (new): %s", run_id[:8])
-            return run_id
-        except PyMongoError:
-            # Another worker created it between our find and insert.
-            return None
+                })
+                logger.info("Run lock acquired (slot %s): %s", slot, run_id[:8])
+                return lock_id
+            except PyMongoError:
+                continue
 
-    existing_expires = existing.get("expires_at")
-    if existing_expires is not None:
-        # Normalize timezone if Mongo returned an aware datetime
-        if existing_expires.tzinfo is not None:
-            existing_expires = existing_expires.replace(tzinfo=None)
-        if existing_expires > now:
-            logger.info("Run lock held by another run, skipping")
-            return None
+        existing_expires = existing.get("expires_at")
+        if existing_expires is not None:
+            if existing_expires.tzinfo is not None:
+                existing_expires = existing_expires.replace(tzinfo=None)
+            if existing_expires > now:
+                continue
 
-    # Lock is expired (or missing expiry) — take over.
-    result = db.run_lock.update_one(
-        {"_id": "run_lock", "holder": existing.get("holder")},
-        {"$set": {"holder": run_id, "expires_at": expires_at, "started_at": now}},
-    )
-    if result.modified_count == 1:
-        logger.info("Run lock taken over (expired): %s", run_id[:8])
-        return run_id
+        result = db.run_lock.update_one(
+            {"_id": lock_id, "holder": existing.get("holder")},
+            {"$set": {"holder": run_id, "expires_at": expires_at, "started_at": now}},
+        )
+        if result.modified_count == 1:
+            logger.info("Run lock taken over (slot %s): %s", slot, run_id[:8])
+            return lock_id
+
+    logger.warning("All 4 run-lock slots busy, skipping")
     return None
 
 
-def release_run_lock(run_id: str) -> None:
+def release_run_lock(lock_id: str) -> None:
     db = get_db()
-    db.run_lock.delete_one({"_id": "run_lock", "holder": run_id})
+    db.run_lock.delete_one({"_id": lock_id})
 
 
 # ---------- Progress ----------
