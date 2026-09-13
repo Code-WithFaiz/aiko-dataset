@@ -1,0 +1,39 @@
+# ═══════════════════════════════════════════
+# SECRETS — KABHI GIT ME NAHI JAYENGE
+# ═══════════════════════════════════════════
+.env
+.env.local
+.env.*.local
+*.key
+secrets/
+
+# ═══════════════════════════════════════════
+# DATA — Github Releases me jayega, git me nahi
+# ═══════════════════════════════════════════
+data/batches/*.jsonl
+data/batches/*.txt
+data/logs/*.log
+data/checkpoints/
+
+# ═══════════════════════════════════════════
+# PYTHON
+# ═══════════════════════════════════════════
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# ═══════════════════════════════════════════
+# IDE / OS
+# ═══════════════════════════════════════════
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
