@@ -49,10 +49,16 @@ def get_db() -> Database:
 
 
 def _ensure_indexes(db: Database) -> None:
-    db.seen_hashes.create_index("hash", unique=True)
-    db.seen_hashes.create_index("created_at", expireAfterSeconds=SEEN_HASH_TTL_DAYS * 86400)
-    db.leaf_state.create_index("_id", unique=True)
-
+    """Create indexes needed for state queries. Idempotent and safe."""
+    try:
+        db.seen_hashes.create_index("hash", unique=True)
+    except PyMongoError as e:
+        logger.warning("Could not create seen_hashes.hash index: %s", e)
+    try:
+        db.seen_hashes.create_index("created_at", expireAfterSeconds=SEEN_HASH_TTL_DAYS * 86400)
+    except PyMongoError as e:
+        logger.warning("Could not create seen_hashes.created_at TTL index: %s", e)
+    # Note: _id is already unique by default, no explicit index needed.
 
 # ---------- Run lock (concurrency safety) ----------
 
