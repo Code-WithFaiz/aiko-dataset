@@ -169,7 +169,7 @@ def _call_with_key_rotation(key_rotator: KeyRotator, prompt: str) -> str | None:
             key_rotator.mark_success(key)
             db.increment_key_requests(_key_id(key))
             return text
-          except GeminiCallError as exc:
+        except GeminiCallError as exc:
             status = exc.status_code
             if status == 429:
                 key_rotator.mark_rate_limited(key)
