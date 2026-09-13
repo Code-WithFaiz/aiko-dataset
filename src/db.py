@@ -64,32 +64,54 @@ def _ensure_indexes(db: Database) -> None:
 # ---------- Run lock (concurrency safety) ----------
 
 def acquire_run_lock() -> Optional[str]:
-    """Try to take the run lock. Returns a run_id if acquired, else None."""
+    """Try to take the run lock. Returns a run_id if acquired, else None.
+
+    Uses a naive-UTC timestamp (MongoDB strips timezone info anyway)
+    and a manual check-then-update pattern to avoid upsert+filter
+    conflicts that cause DuplicateKeyError.
+    """
     db = get_db()
     run_id = uuid.uuid4().hex
-    now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)  # naive UTC
     expires_at = now + timedelta(seconds=RUN_LOCK_TTL_SECONDS)
-    try:
-        result = db.run_lock.find_one_and_update(
-            {
-                "_id": "run_lock",
-                "$or": [
-                    {"expires_at": {"$lte": now}},
-                    {"expires_at": {"$exists": False}},
-                ],
-            },
-            {"$set": {"holder": run_id, "expires_at": expires_at, "started_at": now}},
-            upsert=True,
-            return_document=ReturnDocument.AFTER,
-        )
-        if result and result.get("holder") == run_id:
+
+    existing = db.run_lock.find_one({"_id": "run_lock"})
+
+    if existing is None:
+        # No lock yet — try to create one.
+        try:
+            db.run_lock.insert_one(
+                {
+                    "_id": "run_lock",
+                    "holder": run_id,
+                    "expires_at": expires_at,
+                    "started_at": now,
+                }
+            )
+            logger.info("Run lock acquired (new): %s", run_id[:8])
             return run_id
-        return None
-    except PyMongoError:
-        existing = db.run_lock.find_one({"_id": "run_lock"})
-        if existing and existing.get("expires_at", now) <= now:
-            return acquire_run_lock()
-        return None
+        except PyMongoError:
+            # Another worker created it between our find and insert.
+            return None
+
+    existing_expires = existing.get("expires_at")
+    if existing_expires is not None:
+        # Normalize timezone if Mongo returned an aware datetime
+        if existing_expires.tzinfo is not None:
+            existing_expires = existing_expires.replace(tzinfo=None)
+        if existing_expires > now:
+            logger.info("Run lock held by another run, skipping")
+            return None
+
+    # Lock is expired (or missing expiry) — take over.
+    result = db.run_lock.update_one(
+        {"_id": "run_lock", "holder": existing.get("holder")},
+        {"$set": {"holder": run_id, "expires_at": expires_at, "started_at": now}},
+    )
+    if result.modified_count == 1:
+        logger.info("Run lock taken over (expired): %s", run_id[:8])
+        return run_id
+    return None
 
 
 def release_run_lock(run_id: str) -> None:
