@@ -14,8 +14,8 @@ from google import genai
 
 logger = logging.getLogger(__name__)
 
-PRIMARY_MODEL = "gemini-3.8-flash"
-FALLBACK_MODEL = "gemini-3.8-flash"
+PRIMARY_MODEL = "gemini-3.5-flash-lite"
+FALLBACK_MODEL = "gemini-3.5-flash"
 TEMPERATURE = float(os.getenv("TEMPERATURE", "1.1"))
 TOP_P = 0.95
 TOP_K = 40
