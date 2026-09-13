@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 # --- CRITICAL: respectful address (client requirement) ---
 FORBIDDEN_ADDRESS_WORDS = [
-    "tumra", "tera", "raa", "tum chup reho", "tuuna", "baa", "saala", "chup"
+    "tumra", "tera", "raa", "tum chup reho", "tuuna", "baa", "saala",
 ]
 
 # --- CRITICAL: Aiko must never claim to be AI ---
