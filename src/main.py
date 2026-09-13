@@ -169,14 +169,15 @@ def _call_with_key_rotation(key_rotator: KeyRotator, prompt: str) -> str | None:
             key_rotator.mark_success(key)
             db.increment_key_requests(_key_id(key))
             return text
-        except GeminiCallError as exc:
+          except GeminiCallError as exc:
             status = exc.status_code
             if status == 429:
                 key_rotator.mark_rate_limited(key)
                 continue
-            if status == 403:
+            if status in (401, 403):
                 key_rotator.mark_dead(key)
                 db.update_key_stats(_key_id(key), dead=True)
+                logger.warning("Key ...%s unauthorized/invalid, marking dead", key[-4:])
                 continue
             if status in (500, 503):
                 server_error_retries += 1
