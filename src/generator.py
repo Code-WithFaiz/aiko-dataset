@@ -1,7 +1,8 @@
 # src/generator.py
 """
 Core generation logic: topic flattening, the context builder (the
-heart of this project — Section 4.2), and the Gemini call.
+heart of this project — Section 4.2), and the Gemini call via the
+new Interactions API.
 """
 from __future__ import annotations
 
@@ -10,12 +11,11 @@ import os
 from typing import Optional
 
 from google import genai
-from google.genai import types
 
 logger = logging.getLogger(__name__)
 
-PRIMARY_MODEL = "gemini-3.6-flash"
-FALLBACK_MODEL = "gemini-3.6-flash"
+PRIMARY_MODEL = "gemini-3.8-flash"
+FALLBACK_MODEL = "gemini-3.8-flash"
 TEMPERATURE = float(os.getenv("TEMPERATURE", "1.1"))
 TOP_P = 0.95
 TOP_K = 40
@@ -47,7 +47,6 @@ def flatten_topics(tree: dict) -> list[dict]:
             leaves.append({
                 "path": new_path,
                 "definitions": new_defs,
-                # main_subtopics_string = ancestor defs only, NEVER the leaf's own def
                 "main_subtopics_string": ". ".join(definitions) + ("." if definitions else ""),
                 "core_topic": node["topic"],
                 "core_definition": node["definition"],
@@ -106,24 +105,62 @@ def build_prompt(personality_text: str, leaf: dict, scenarios: list[str], opener
     return "\n\n".join([part1, part2, part3, part4, part5, part6])
 
 
-def call_gemini(prompt: str, api_key: str, model: str = PRIMARY_MODEL) -> str:
-    """One API call = one complete conversation."""
-    client = genai.Client(api_key=api_key)
-    config = types.GenerateContentConfig(
-        temperature=TEMPERATURE,
-        top_p=TOP_P,
-        top_k=TOP_K,
-        max_output_tokens=MAX_OUTPUT_TOKENS,
-    )
-    try:
-        response = client.models.generate_content(model=model, contents=prompt, config=config)
-    except Exception as exc:  # google-genai raises HTTP-coded exceptions
-        status = getattr(exc, "code", None) or getattr(exc, "status_code", None)
-        raise GeminiCallError(str(exc), status_code=status) from exc
+def _extract_text(response) -> str:
+    """Robust text extraction from the new Interactions API response.
 
-    if not response.text:
+    The SDK shape may vary; try every plausible attribute before falling
+    back to stringifying the whole response.
+    """
+    # Direct string attributes (most common)
+    for attr in ("output_text", "text", "content", "output"):
+        val = getattr(response, attr, None)
+        if isinstance(val, str) and val.strip():
+            return val
+
+    # List-like outputs
+    outputs = getattr(response, "outputs", None) or getattr(response, "output", None)
+    if outputs is not None:
+        if isinstance(outputs, str):
+            return outputs
+        if isinstance(outputs, list):
+            parts = []
+            for item in outputs:
+                if isinstance(item, str):
+                    parts.append(item)
+                else:
+                    for sub in ("text", "content", "output_text"):
+                        v = getattr(item, sub, None)
+                        if isinstance(v, str) and v:
+                            parts.append(v)
+                            break
+            if parts:
+                return "\n".join(parts)
+
+    # Fallback: dump everything so we can debug from logs
+    logger.warning("Could not extract text cleanly; dumping response repr")
+    logger.warning("Response repr: %r", response)
+    return str(response)
+
+
+def call_gemini(prompt: str, api_key: str, model: str = PRIMARY_MODEL) -> str:
+    """One API call = one complete conversation. Uses new Interactions API."""
+    client = genai.Client(api_key=api_key)
+
+    try:
+        response = client.interactions.create(model=model, input=prompt)
+    except Exception as exc:
+        status = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+        # Retry once without any optional params in case SDK rejects them
+        try:
+            response = client.interactions.create(model=model, input=prompt)
+        except Exception as exc2:
+            status2 = getattr(exc2, "code", None) or getattr(exc2, "status_code", None)
+            raise GeminiCallError(str(exc2), status_code=status2 or status) from exc2
+
+    text = _extract_text(response).strip()
+    if not text:
         raise GeminiCallError("Empty response from Gemini", status_code=None)
-    return response.text
+    return text
 
 
 def parse_conversation(text: str) -> str:
