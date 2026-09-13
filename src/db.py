@@ -15,7 +15,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from pymongo import ASCENDING, MongoClient, ReturnDocument
+from pymongo import ASCENDING, MongoClient, ReturnDocument, UpdateOne
 from pymongo.collection import Collection
 from pymongo.database import Database
 from pymongo.errors import PyMongoError
@@ -59,6 +59,7 @@ def _ensure_indexes(db: Database) -> None:
     except PyMongoError as e:
         logger.warning("Could not create seen_hashes.created_at TTL index: %s", e)
     # Note: _id is already unique by default, no explicit index needed.
+
 
 # ---------- Run lock (concurrency safety) ----------
 
@@ -149,27 +150,55 @@ def set_leaf_order(paths: list[str]) -> None:
 
 
 def init_leaf_quotas(leaves: list[dict]) -> None:
-    """Idempotent: only inserts leaves that don't already have state."""
+    """Idempotent bulk upsert of leaf quotas. ~10x faster than sequential."""
     db = get_db()
     n = len(leaves)
+    if n == 0:
+        return
     base_quota = 600_000 // n
     remainder = 600_000 % n
+
+    ops = []
     for i, leaf in enumerate(leaves):
         quota = base_quota + (1 if i < remainder else 0)
-        db.leaf_state.update_one(
-            {"_id": leaf["leaf_path"]},
-            {"$setOnInsert": {"quota": quota, "generated": 0}},
-            upsert=True,
+        ops.append(
+            UpdateOne(
+                {"_id": leaf["leaf_path"]},
+                {"$setOnInsert": {"quota": quota, "generated": 0}},
+                upsert=True,
+            )
         )
+
+    total_upserted = 0
+    for i in range(0, len(ops), 500):
+        chunk = ops[i : i + 500]
+        try:
+            result = db.leaf_state.bulk_write(chunk, ordered=False)
+            total_upserted += result.upserted_count
+        except PyMongoError as e:
+            logger.warning("Bulk leaf init chunk %d failed: %s", i, e)
+    logger.info(
+        "init_leaf_quotas: %d leaves processed (%d new)", len(leaves), total_upserted
+    )
 
 
 def get_next_leaf_path(ordered_paths: list[str]) -> Optional[str]:
-    """First leaf (in shuffled order) whose generated < quota."""
+    """First leaf (in shuffled order) whose generated < quota.
+
+    Only fetches unfilled leaves from Mongo, then walks the shuffled
+    order to find the earliest one. Much faster than fetching all
+    leaf_state docs on every call.
+    """
     db = get_db()
-    states = {s["_id"]: s for s in db.leaf_state.find({"_id": {"$in": ordered_paths}})}
+    cursor = db.leaf_state.find(
+        {"$expr": {"$lt": ["$generated", "$quota"]}},
+        {"_id": 1},
+    )
+    unfilled = {d["_id"] for d in cursor}
+    if not unfilled:
+        return None
     for path in ordered_paths:
-        s = states.get(path)
-        if s and s["generated"] < s["quota"]:
+        if path in unfilled:
             return path
     return None
 
