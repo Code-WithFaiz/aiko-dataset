@@ -16,7 +16,7 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-RATE_LIMIT_COOLDOWN_SECONDS = 60
+RATE_LIMIT_COOLDOWN_SECONDS = 90
 ALL_COOLING_SLEEP_SECONDS = 60
 
 

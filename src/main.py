@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 CONFIG_DIR = Path("config")
 LOOP_ITERATIONS = int(os.getenv("BATCH_SIZE", "100"))
-BATCH_UPLOAD_THRESHOLD = 30
+BATCH_UPLOAD_THRESHOLD = 15
 DAILY_TARGET = int(os.getenv("DAILY_TARGET", "6700"))
 OPENER_CATEGORIES = [
     "greeting", "question", "reaction", "concern", "playful", "miss",
