@@ -164,9 +164,14 @@ def call_gemini(prompt: str, api_key: str, model: str = PRIMARY_MODEL) -> str:
 
 
 def parse_conversation(text: str) -> str:
-    """Strip whitespace/markdown fences that occasionally leak into output."""
+    """Strip whitespace/markdown fences; ensure closing brace."""
     cleaned = text.strip()
     if cleaned.startswith("```"):
         lines = [l for l in cleaned.splitlines() if not l.strip().startswith("```")]
         cleaned = "\n".join(lines).strip()
+    # Ensure starts with { and ends with }
+    if not cleaned.startswith("{"):
+        cleaned = "{\n" + cleaned
+    if not cleaned.endswith("}"):
+        cleaned = cleaned + "\n}"
     return cleaned
