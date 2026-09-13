@@ -562,6 +562,17 @@ Never hardcode. Load via `os.getenv`.
 Actions. Workflow passes them as env vars via `${{ secrets.X }}`.
 
 ---
+### 12.1 IMPORTANT — Secret Name Note
+
+GitHub secret names `GITHUB_` prefix se shuru nahi ho sakte (GitHub internally 
+reserves them). So we use:
+- `GH_PAT` — instead of `GITHUB_TOKEN` (PAT value)
+- `GH_REPO` — instead of `GITHUB_REPO` (value: `Code-WithFaiz/aiko-dataset`)
+
+**All code + workflow must use `GH_PAT` and `GH_REPO` — NOT `GITHUB_TOKEN` or 
+`GITHUB_REPO`.**
+
+---
 
 ## SECTION 13 — DEPLOYMENT (Owner's steps)
 
