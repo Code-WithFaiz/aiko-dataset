@@ -55,14 +55,14 @@ def is_duplicate(
 
     sig = signature(text)
     for existing in recent_signatures:
-        if jaccard_similarity(sig, existing) > 0.85:
-            return True, "signature_similarity>0.85"
+        if jaccard_similarity(sig, existing) > 0.90:
+            return True, "signature_similarity>0.90"
 
     opening = opening_text(text)
     for existing in recent_openings:
         if opening == existing:
             return True, "exact_opening_duplicate"
-        if jaccard_similarity(opening, existing) > 0.9:
-            return True, "opening_similarity>0.9"
+        if jaccard_similarity(opening, existing) > 0.95:
+            return True, "opening_similarity>0.95"
 
     return False, "unique"
