@@ -1,0 +1,50 @@
+name: Test Gemini Keys
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: Test keys
+        env:
+          GEMINI_KEY_1: ${{ secrets.GEMINI_KEY_1 }}
+          GEMINI_KEY_2: ${{ secrets.GEMINI_KEY_2 }}
+          GEMINI_KEY_3: ${{ secrets.GEMINI_KEY_3 }}
+          GEMINI_KEY_4: ${{ secrets.GEMINI_KEY_4 }}
+          GEMINI_KEY_5: ${{ secrets.GEMINI_KEY_5 }}
+          GEMINI_KEY_6: ${{ secrets.GEMINI_KEY_6 }}
+          GEMINI_KEY_7: ${{ secrets.GEMINI_KEY_7 }}
+          GEMINI_KEY_8: ${{ secrets.GEMINI_KEY_8 }}
+          GEMINI_KEY_9: ${{ secrets.GEMINI_KEY_9 }}
+          GEMINI_KEY_10: ${{ secrets.GEMINI_KEY_10 }}
+          GEMINI_KEY_11: ${{ secrets.GEMINI_KEY_11 }}
+          GEMINI_KEY_12: ${{ secrets.GEMINI_KEY_12 }}
+          GEMINI_KEY_13: ${{ secrets.GEMINI_KEY_13 }}
+          GEMINI_KEY_14: ${{ secrets.GEMINI_KEY_14 }}
+          GEMINI_KEY_15: ${{ secrets.GEMINI_KEY_15 }}
+          GEMINI_KEY_16: ${{ secrets.GEMINI_KEY_16 }}
+          GEMINI_KEY_17: ${{ secrets.GEMINI_KEY_17 }}
+          GEMINI_KEY_18: ${{ secrets.GEMINI_KEY_18 }}
+          GEMINI_KEY_19: ${{ secrets.GEMINI_KEY_19 }}
+          GEMINI_KEY_20: ${{ secrets.GEMINI_KEY_20 }}
+          GEMINI_KEY_21: ${{ secrets.GEMINI_KEY_21 }}
+          GEMINI_KEY_22: ${{ secrets.GEMINI_KEY_22 }}
+          GEMINI_KEY_23: ${{ secrets.GEMINI_KEY_23 }}
+          GEMINI_KEY_24: ${{ secrets.GEMINI_KEY_24 }}
+          GEMINI_KEY_25: ${{ secrets.GEMINI_KEY_25 }}
+          GEMINI_KEY_26: ${{ secrets.GEMINI_KEY_26 }}
+          GEMINI_KEY_27: ${{ secrets.GEMINI_KEY_27 }}
+          GEMINI_KEY_28: ${{ secrets.GEMINI_KEY_28 }}
+          GEMINI_KEY_29: ${{ secrets.GEMINI_KEY_29 }}
+          GEMINI_KEY_30: ${{ secrets.GEMINI_KEY_30 }}
+          GEMINI_KEY_31: ${{ secrets.GEMINI_KEY_31 }}
+          GEMINI_KEY_32: ${{ secrets.GEMINI_KEY_32 }}
+        run: python scripts/test_keys.py
