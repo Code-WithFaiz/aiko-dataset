@@ -1,6 +1,7 @@
 # src/main.py
 """
-Orchestrator: one invocation = one GitHub Actions run (every 5 min).
+Orchestrator: one invocation = one GitHub Actions run.
+Graceful shutdown at 42 min (before GitHub's 45 min hard timeout).
 """
 from __future__ import annotations
 
@@ -41,7 +42,7 @@ CONFIG_DIR = Path("config")
 LOOP_ITERATIONS = int(os.getenv("BATCH_SIZE", "100"))
 BATCH_UPLOAD_THRESHOLD = 15
 DAILY_TARGET = int(os.getenv("DAILY_TARGET", "6700"))
-RUN_DEADLINE_SECONDS = 42 * 60  # graceful shutdown at 42 min (3 min buffer for GitHub's 45 min timeout)
+RUN_DEADLINE_SECONDS = 42 * 60  # graceful shutdown at 42 min
 OPENER_CATEGORIES = [
     "greeting", "question", "reaction", "concern", "playful", "miss",
     "direct", "callback", "mood", "romantic", "teasing", "warm",
@@ -124,7 +125,7 @@ def generate_one(
     recent_signatures = db.get_recent_signatures()
     recent_openings = db.get_recent_openings()
 
-    for attempt in range(1, 4):  # Section 4.6: retry up to 3 times on reject
+    for attempt in range(1, 4):
         if deadline is not None and time.monotonic() >= deadline:
             return None, "deadline_reached"
         scenarios = pick_scenarios(all_scenarios, leaf, recent_scenarios)
@@ -147,7 +148,6 @@ def generate_one(
         if is_dup:
             logger.warning("Dedup reject (attempt %d): %s", attempt, dup_reason)
             if attempt == 3:
-                # Section 4.6: if still failing after 3 tries, accept anyway (rare)
                 db.add_used_scenarios(scenarios)
                 return conversation, "accepted_after_dedup_retries_exhausted"
             continue
@@ -202,8 +202,7 @@ def _call_with_key_rotation(
 
 
 def _key_id(key: str) -> str:
-    """Stable key ID for MongoDB tracking (Python's builtin hash() is not
-    stable across processes, so we use a deterministic digest instead)."""
+    """Stable key ID for MongoDB tracking."""
     return f"key_{hashlib.sha256(key.encode()).hexdigest()[:12]}"
 
 
@@ -238,7 +237,7 @@ def _run_locked() -> int:
         logger.critical("DB unreachable or leaf setup failed: %s", exc)
         return 1
 
-        batch: list[str] = []
+    batch: list[str] = []
     generated = 0
     rejected = 0
     run_start = time.monotonic()
@@ -261,13 +260,12 @@ def _run_locked() -> int:
             break
         leaf = leaf_by_path[leaf_path]
 
-                try:
+        try:
             conversation, reason = generate_one(
                 key_rotator, personality_text, leaf, all_scenarios, all_openers,
                 deadline=deadline,
             )
         except Exception as exc:
-            # Section 11: never let one bad conversation crash a batch
             logger.error("Unexpected error generating conversation %d: %s", i, exc)
             rejected += 1
             continue
@@ -275,6 +273,13 @@ def _run_locked() -> int:
         if conversation is None:
             rejected += 1
             if reason == "all_keys_exhausted":
+                break
+            if reason == "deadline_reached":
+                logger.info(
+                    "Graceful shutdown inside generate_one (deadline). Flushing %d batched conversations.",
+                    len(batch),
+                )
+                graceful_shutdown = True
                 break
             continue
 
@@ -293,7 +298,7 @@ def _run_locked() -> int:
     if batch:
         _flush_batch(batch)
 
-        db.record_generated(generated, rejected)
+    db.record_generated(generated, rejected)
     logger.info(
         "Run complete: generated=%d rejected=%d%s",
         generated, rejected,
@@ -316,44 +321,9 @@ def _flush_batch(batch: list[str]) -> None:
 
 def _maybe_send_daily_report() -> None:
     try:
-        progress = db.get_progress()
-        today = datetime.now(timezone.utc)
-        yesterday = (today - timedelta(days=1)).strftime("%Y-%m-%d")
-        daily_stats = progress.get("daily_stats", {})
-        y_stats = daily_stats.get(yesterday, {"generated": 0, "rejected": 0})
-        total_generated = progress.get("total_generated", 0)
-        started_at = progress.get("started_at", today)
-        days_elapsed = max(1, (today - started_at).days) if isinstance(started_at, datetime) else 1
-        total_leaves = len(db.get_leaf_order() or [])
-        leaves_completed = db.leaves_completed_count()
-
-        pct = (total_generated / 600_000) * 100
-        remaining = 600_000 - total_generated
-        daily_rate = max(1, total_generated // max(1, days_elapsed))
-        eta_days = remaining // daily_rate if daily_rate else 0
-        estimated_finish = (today + timedelta(days=eta_days)).strftime("%Y-%m-%d")
-
-        stats = {
-            "yesterday_generated": y_stats.get("generated", 0),
-            "yesterday_rejected": y_stats.get("rejected", 0),
-            "total_generated": total_generated,
-            "pct_complete": pct,
-            "days_elapsed": days_elapsed,
-            "estimated_finish": estimated_finish,
-            "validation_reject_pct": 0.0,
-            "dup_reject_pct": 0.0,
-            "top_reject_reasons": "n/a",
-            "leaves_completed": leaves_completed,
-            "total_leaves": total_leaves,
-            "current_leaf": progress.get("current_leaf_index", "n/a"),
-            "mongo_size_mb": 0.0,
-            "error_count": 0,
-            "top_errors": "none",
-            "next_target": max(0, DAILY_TARGET - y_stats.get("generated", 0)),
-        }
         notifier.send_daily_report()
     except Exception as exc:
-        logger.error("Failed to build/send daily report: %s", exc)
+        logger.error("Failed to send daily report: %s", exc)
 
 
 if __name__ == "__main__":
