@@ -324,7 +324,7 @@ def _maybe_send_daily_report() -> None:
             "top_errors": "none",
             "next_target": max(0, DAILY_TARGET - y_stats.get("generated", 0)),
         }
-        notifier.send_daily_report(stats)
+        notifier.send_daily_report()
     except Exception as exc:
         logger.error("Failed to build/send daily report: %s", exc)
 
