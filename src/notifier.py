@@ -3,12 +3,14 @@
 Daily email report via Gmail SMTP. Sends at most once per 24h,
 tracked in MongoDB `notifier_state`.
 
-Counts come from `batch_log` collection (ground truth: every uploaded
-batch logs its conversation count), NOT from `progress.total_generated`
-which only updates on cleanly-finished runs.
+Counts come from `batch_log` collection (ground truth).
+
+Key health section is READ-ONLY from MongoDB `key_stats`.
+ZERO Gemini API calls — no impact on running system.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import smtplib
@@ -20,13 +22,58 @@ from src import db
 logger = logging.getLogger(__name__)
 
 
+def _key_id(key: str) -> str:
+    """Same hash used by main.py — deterministic mapping key -> key_stats._id."""
+    return f"key_{hashlib.sha256(key.encode()).hexdigest()[:12]}"
+
+
 def _safe_mongo_size_mb() -> float:
-    """Query MongoDB dbStats for data size in MB (best effort)."""
     try:
         stats = db.get_db().command("dbStats")
         return stats.get("dataSize", 0) / (1024 * 1024)
     except Exception:
         return 0.0
+
+
+def _build_key_health() -> dict:
+    """Read-only key health from MongoDB. ZERO Gemini API calls."""
+    database = db.get_db()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    working, dead, cooling, unknown = [], [], [], []
+
+    for i in range(1, 51):
+        key = os.getenv(f"GEMINI_KEY_{i}")
+        if not key:
+            continue
+        kid = _key_id(key)
+        try:
+            doc = database.key_stats.find_one({"_id": kid})
+        except Exception:
+            unknown.append(i)
+            continue
+        if doc is None:
+            unknown.append(i)
+            continue
+        if doc.get("dead"):
+            dead.append(i)
+            continue
+        cooldown = doc.get("cooldown_until")
+        if cooldown and isinstance(cooldown, datetime):
+            if cooldown.tzinfo is not None:
+                cooldown = cooldown.replace(tzinfo=None)
+            if cooldown > now:
+                cooling.append(i)
+                continue
+        working.append(i)
+
+    return {
+        "working": working,
+        "dead": dead,
+        "cooling": cooling,
+        "unknown": unknown,
+        "total": len(working) + len(dead) + len(cooling) + len(unknown),
+    }
 
 
 def _build_stats_from_db() -> dict:
@@ -42,23 +89,20 @@ def _build_stats_from_db() -> dict:
     total_batches = 0
 
     try:
-        cursor = database.batch_log.find({}, {"count": 1, "created_at": 1})
-        for doc in cursor:
+        for doc in database.batch_log.find({}, {"count": 1, "created_at": 1}):
             cnt = doc.get("count", 0)
             total_uploaded += cnt
             total_batches += 1
             created = doc.get("created_at")
-            if created:
-                if hasattr(created, "strftime"):
-                    day_str = created.strftime("%Y-%m-%d")
-                    if day_str == yesterday:
-                        yesterday_uploaded += cnt
-                    elif day_str == today:
-                        today_uploaded += cnt
+            if created and hasattr(created, "strftime"):
+                day_str = created.strftime("%Y-%m-%d")
+                if day_str == yesterday:
+                    yesterday_uploaded += cnt
+                elif day_str == today:
+                    today_uploaded += cnt
     except Exception as exc:
         logger.warning("batch_log query failed: %s", exc)
 
-    # Progress doc (for days elapsed, leaves)
     progress = db.get_progress()
     started_at = progress.get("started_at", now)
     if isinstance(started_at, datetime):
@@ -68,7 +112,6 @@ def _build_stats_from_db() -> dict:
     else:
         days_elapsed = 1
 
-    # Leaves progress
     try:
         total_leaves = len(db.get_leaf_order() or [])
         leaves_completed = db.leaves_completed_count()
@@ -76,17 +119,11 @@ def _build_stats_from_db() -> dict:
         total_leaves = 0
         leaves_completed = 0
 
-    # Percentage and estimate
     pct = (total_uploaded / 600_000) * 100 if total_uploaded else 0.0
     remaining = max(0, 600_000 - total_uploaded)
 
-    # Average rate from actual data
-    if days_elapsed > 0 and total_uploaded > 0:
-        avg_per_day = total_uploaded / days_elapsed
-    else:
-        avg_per_day = 1
+    avg_per_day = (total_uploaded / days_elapsed) if days_elapsed > 0 and total_uploaded else 1
 
-    # Recent 3-day rate (more accurate for current speed)
     recent_uploaded = 0
     three_days_ago = (now - timedelta(days=3)).strftime("%Y-%m-%d")
     try:
@@ -100,11 +137,8 @@ def _build_stats_from_db() -> dict:
 
     recent_rate = recent_uploaded / 3 if recent_uploaded else avg_per_day
     rate_for_estimate = max(recent_rate, 1)
-
     eta_days = int(remaining / rate_for_estimate) if remaining else 0
     estimated_finish = (now + timedelta(days=eta_days)).strftime("%Y-%m-%d")
-
-    mongo_mb = _safe_mongo_size_mb()
 
     return {
         "yesterday_generated": yesterday_uploaded,
@@ -118,12 +152,25 @@ def _build_stats_from_db() -> dict:
         "recent_rate": int(recent_rate),
         "leaves_completed": leaves_completed,
         "total_leaves": total_leaves,
-        "mongo_size_mb": mongo_mb,
+        "mongo_size_mb": _safe_mongo_size_mb(),
+        "key_health": _build_key_health(),
     }
 
 
+def _format_key_list(keys: list) -> str:
+    if not keys:
+        return "none"
+    return ", ".join(f"KEY_{i}" for i in sorted(keys))
+
+
 def _build_report_body(stats: dict) -> str:
-    return f"""=== SUMMARY (ground truth from uploaded batches) ===
+    kh = stats.get("key_health", {})
+    working = kh.get("working", [])
+    dead = kh.get("dead", [])
+    cooling = kh.get("cooling", [])
+    unknown = kh.get("unknown", [])
+
+    return f"""=== SUMMARY ===
 Total uploaded:        {stats['total_generated']:,} / 600,000 ({stats['pct_complete']:.2f}%)
 Total batches:         {stats['total_batches']:,}
 Yesterday uploaded:    {stats['yesterday_generated']:,}
@@ -135,6 +182,13 @@ Last 3 days rate:      {stats['recent_rate']:,}/day
 Days elapsed:          {stats['days_elapsed']}
 Estimated finish:      {stats['estimated_finish']}
 
+=== KEY HEALTH (read-only, zero API calls) ===
+Total keys in env:     {kh.get('total', 0)}
+Working:               {len(working)}  -> {_format_key_list(working)}
+Cooling (rate limit):  {len(cooling)}  -> {_format_key_list(cooling)}
+Dead:                  {len(dead)}  -> {_format_key_list(dead)}
+Untested (never used): {len(unknown)}  -> {_format_key_list(unknown)}
+
 === PROGRESS ===
 Leaves completed:      {stats['leaves_completed']} / {stats['total_leaves']}
 MongoDB size:          {stats['mongo_size_mb']:.1f} MB / 512 MB
@@ -144,8 +198,7 @@ Target:                ~{stats['recent_rate']:,} conversations
 Remaining to 600k:     {max(0, 600_000 - stats['total_generated']):,}
 
 ---
-Note: Numbers are counted from actual uploaded batches
-(ground truth), not from run counters.
+Key health is READ-ONLY from MongoDB key_stats. No Gemini API calls.
 """
 
 
@@ -162,7 +215,6 @@ def send_daily_report(stats: dict | None = None) -> None:
         logger.error("Email env vars missing, skipping daily report")
         return
 
-    # If stats not passed, build from DB (ground truth)
     if stats is None:
         stats = _build_stats_from_db()
 
