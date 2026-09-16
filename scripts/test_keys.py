@@ -27,7 +27,7 @@ def main() -> None:
     print("=" * 60)
 
     results = {}
-    for i in range(1, 40):
+    for i in range(1, 17):
         key = os.getenv(f"GEMINI_KEY_{i}")
         if not key:
             continue
