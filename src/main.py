@@ -41,6 +41,7 @@ CONFIG_DIR = Path("config")
 LOOP_ITERATIONS = int(os.getenv("BATCH_SIZE", "100"))
 BATCH_UPLOAD_THRESHOLD = 15
 DAILY_TARGET = int(os.getenv("DAILY_TARGET", "6700"))
+RUN_DEADLINE_SECONDS = 42 * 60  # graceful shutdown at 42 min (3 min buffer for GitHub's 45 min timeout)
 OPENER_CATEGORIES = [
     "greeting", "question", "reaction", "concern", "playful", "miss",
     "direct", "callback", "mood", "romantic", "teasing", "warm",
@@ -116,6 +117,7 @@ def generate_one(
     leaf: dict,
     all_scenarios: list[str],
     all_openers: list[dict],
+    deadline: float | None = None,
 ) -> tuple[str | None, str]:
     """Returns (conversation_text_or_None, reason)."""
     recent_scenarios = db.get_recent_scenarios()
@@ -123,11 +125,13 @@ def generate_one(
     recent_openings = db.get_recent_openings()
 
     for attempt in range(1, 4):  # Section 4.6: retry up to 3 times on reject
+        if deadline is not None and time.monotonic() >= deadline:
+            return None, "deadline_reached"
         scenarios = pick_scenarios(all_scenarios, leaf, recent_scenarios)
         openers = pick_openers(all_openers)
         prompt = build_prompt(personality_text, leaf, scenarios, openers)
 
-        text = _call_with_key_rotation(key_rotator, prompt)
+        text = _call_with_key_rotation(key_rotator, prompt, deadline=deadline)
         if text is None:
             return None, "all_keys_exhausted"
 
@@ -154,11 +158,15 @@ def generate_one(
     return None, "exhausted_retries"
 
 
-def _call_with_key_rotation(key_rotator: KeyRotator, prompt: str) -> str | None:
+def _call_with_key_rotation(
+    key_rotator: KeyRotator, prompt: str, deadline: float | None = None
+) -> str | None:
     model = PRIMARY_MODEL
     server_error_retries = 0
 
     while True:
+        if deadline is not None and time.monotonic() >= deadline:
+            return None
         key = key_rotator.wait_for_available_key()
         if key is None:
             logger.critical("All Gemini keys dead")
@@ -230,19 +238,34 @@ def _run_locked() -> int:
         logger.critical("DB unreachable or leaf setup failed: %s", exc)
         return 1
 
-    batch: list[str] = []
+        batch: list[str] = []
     generated = 0
     rejected = 0
+    run_start = time.monotonic()
+    deadline = run_start + RUN_DEADLINE_SECONDS
+    graceful_shutdown = False
 
     for i in range(LOOP_ITERATIONS):
+        elapsed = time.monotonic() - run_start
+        if elapsed >= RUN_DEADLINE_SECONDS:
+            logger.info(
+                "Graceful shutdown at %.1fs (deadline=%ds). Flushing %d batched conversations.",
+                elapsed, RUN_DEADLINE_SECONDS, len(batch),
+            )
+            graceful_shutdown = True
+            break
+
         leaf_path = db.get_next_leaf_path(order)
         if leaf_path is None:
             logger.info("All leaf quotas filled — dataset complete!")
             break
         leaf = leaf_by_path[leaf_path]
 
-        try:
-            conversation, reason = generate_one(key_rotator, personality_text, leaf, all_scenarios, all_openers)
+                try:
+            conversation, reason = generate_one(
+                key_rotator, personality_text, leaf, all_scenarios, all_openers,
+                deadline=deadline,
+            )
         except Exception as exc:
             # Section 11: never let one bad conversation crash a batch
             logger.error("Unexpected error generating conversation %d: %s", i, exc)
@@ -270,8 +293,12 @@ def _run_locked() -> int:
     if batch:
         _flush_batch(batch)
 
-    db.record_generated(generated, rejected)
-    logger.info("Run complete: generated=%d rejected=%d", generated, rejected)
+        db.record_generated(generated, rejected)
+    logger.info(
+        "Run complete: generated=%d rejected=%d%s",
+        generated, rejected,
+        " [graceful_shutdown]" if graceful_shutdown else "",
+    )
 
     _maybe_send_daily_report()
     return 0
