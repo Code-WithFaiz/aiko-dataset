@@ -31,20 +31,4 @@ jobs:
           GEMINI_KEY_14: ${{ secrets.GEMINI_KEY_14 }}
           GEMINI_KEY_15: ${{ secrets.GEMINI_KEY_15 }}
           GEMINI_KEY_16: ${{ secrets.GEMINI_KEY_16 }}
-          GEMINI_KEY_17: ${{ secrets.GEMINI_KEY_17 }}
-          GEMINI_KEY_18: ${{ secrets.GEMINI_KEY_18 }}
-          GEMINI_KEY_19: ${{ secrets.GEMINI_KEY_19 }}
-          GEMINI_KEY_20: ${{ secrets.GEMINI_KEY_20 }}
-          GEMINI_KEY_21: ${{ secrets.GEMINI_KEY_21 }}
-          GEMINI_KEY_22: ${{ secrets.GEMINI_KEY_22 }}
-          GEMINI_KEY_23: ${{ secrets.GEMINI_KEY_23 }}
-          GEMINI_KEY_24: ${{ secrets.GEMINI_KEY_24 }}
-          GEMINI_KEY_25: ${{ secrets.GEMINI_KEY_25 }}
-          GEMINI_KEY_26: ${{ secrets.GEMINI_KEY_26 }}
-          GEMINI_KEY_27: ${{ secrets.GEMINI_KEY_27 }}
-          GEMINI_KEY_28: ${{ secrets.GEMINI_KEY_28 }}
-          GEMINI_KEY_29: ${{ secrets.GEMINI_KEY_29 }}
-          GEMINI_KEY_30: ${{ secrets.GEMINI_KEY_30 }}
-          GEMINI_KEY_31: ${{ secrets.GEMINI_KEY_31 }}
-          GEMINI_KEY_32: ${{ secrets.GEMINI_KEY_32 }}
         run: python scripts/test_keys.py
