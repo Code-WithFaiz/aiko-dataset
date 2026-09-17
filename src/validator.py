@@ -57,8 +57,8 @@ EMOJI_PATTERN = re.compile(
 TURN_BLOCK_PATTERN = re.compile(r"^(user|Aiko):\s*(.*)$", flags=re.DOTALL | re.IGNORECASE)
 
 MAX_EMOJIS_PER_REPLY = 10   # generous cap
-MIN_TURNS = 4
-MAX_TURNS = 40
+MIN_TURNS = 8
+MAX_TURNS = 16
 
 
 def _word_in_text(word: str, text: str) -> bool:

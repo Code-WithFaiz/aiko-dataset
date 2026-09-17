@@ -27,7 +27,7 @@ _client: Optional[MongoClient] = None
 _db: Optional[Database] = None
 
 
-RUN_LOCK_SLOTS = ["1", "2", "3"]
+RUN_LOCK_SLOTS = ["1", "2", "3", "4"]
 RUN_LOCK_TTL_SECONDS = 50 * 60
 SIGNATURE_BUFFER_CAP = 5000
 SCENARIO_BUFFER_CAP = 50
