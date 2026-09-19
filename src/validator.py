@@ -4,8 +4,10 @@ Lenient validator. Hard-fails only on client-critical rules.
 
 Client-critical (HARD REJECT):
   - Aiko uses forbidden address words (tum/tu/tera/teri/...)
+  - Aiko uses single-p "aap" (must be "app")
   - Aiko uses gaali/slurs
   - Aiko claims to be AI/assistant/robot
+  - Invalid speaker tag (not "user" or "Aiko")
 
 Softer issues are accepted with warnings (logged but not rejected):
   - Emoji count over 5 (up to 10 accepted)
@@ -25,15 +27,21 @@ FORBIDDEN_ADDRESS_WORDS = [
     "tumra", "tera", "raa", "tum chup reho", "tuuna", "baa", "saala",
 ]
 
+# --- CRITICAL: single-p "aap" not allowed in Aiko's lines — must be "app" ---
+FORBIDDEN_SINGLE_P_APP = [
+    "aap", "aapko", "aapki", "aapka", "aapke", "aapne", "aapse",
+    "aapna", "aapni",
+]
+
 # --- CRITICAL: Aiko must never claim to be AI ---
 AI_REFERENCE_PHRASES = [
     "main ek ai", "main ai hoon", "i am an ai", "i am ai",
     "main assistant", "main ek assistant", "main robot",
-    "i am a Ai bot" , "language model", "main bot", "ma eak robot huu", "sorry i can't help", "hii how can i assist you",
+    "i am a Ai bot", "language model", "main bot", "ma eak robot huu",
+    "sorry i can't help", "hii how can i assist you",
 ]
 
-# --- CRITICAL: only the worst slurs (common slang words like "saala"/"saali"
-#     are allowed since users might say them and Aiko may repeat as teasing) ---
+# --- CRITICAL: only the worst slurs ---
 BANNED_WORDS = [
     "chutiya", "chutiye", "madarchod", "behenchod", "bhosdike", "bhosdi",
     "randi", "gandu", "gaand", "lund", "chudai", "bsdk",
@@ -46,7 +54,7 @@ REFUSAL_PHRASES = [
     "main nahi kar sakti",
     "baat nahi karungi",
     "sorry, main ye nahi kar sakti",
-    "ma to nahi karna wali"
+    "ma to nahi karna wali",
 ]
 
 NARRATOR_PATTERN = re.compile(r"\*[^*]+\*")
@@ -54,9 +62,14 @@ EMOJI_PATTERN = re.compile(
     "[\U0001F300-\U0001FAFF\U00002700-\U000027BF\U0001F1E6-\U0001F1FF\U00002600-\U000026FF]",
     flags=re.UNICODE,
 )
-TURN_BLOCK_PATTERN = re.compile(r"^(user|Aiko):\s*(.*)$", flags=re.DOTALL | re.IGNORECASE)
 
-MAX_EMOJIS_PER_REPLY = 10   # generous cap
+# STRICT: only "user" (any case) or "Aiko" (capital A) allowed
+TURN_BLOCK_PATTERN = re.compile(
+    r"^(user|Aiko|User|USER):\s*(.*)$",
+    flags=re.DOTALL,
+)
+
+MAX_EMOJIS_PER_REPLY = 10
 MIN_TURNS = 8
 MAX_TURNS = 16
 
@@ -66,18 +79,17 @@ def _word_in_text(word: str, text: str) -> bool:
 
 
 def _split_turns(body: str) -> list[tuple[str, str]] | None:
-    """Split body into (speaker, content) tuples."""
+    """Split body into (speaker, content) tuples.
+
+    STRICT: any block without a valid speaker tag = reject whole convo.
+    """
     blocks = [b.strip() for b in re.split(r"\n\s*\n", body) if b.strip()]
     turns: list[tuple[str, str]] = []
     for block in blocks:
         m = TURN_BLOCK_PATTERN.match(block)
         if not m:
-            # Lenient: if block doesn't match, try to recover — maybe it's a
-            # continuation of the previous turn
-            if turns:
-                prev_speaker, prev_content = turns[-1]
-                turns[-1] = (prev_speaker, prev_content + "\n" + block)
-                continue
+            # STRICT: invalid speaker tag — reject entire conversation
+            logger.warning("Invalid speaker tag: %r", block[:80])
             return None
         speaker_raw, content = m.group(1), m.group(2).strip()
         speaker = "user" if speaker_raw.lower() == "user" else "Aiko"
@@ -90,11 +102,9 @@ def _split_turns(body: str) -> list[tuple[str, str]] | None:
 def _normalize_format(text: str) -> str:
     """Strip markdown fences and extract from first { to last }."""
     cleaned = text.strip()
-    # Remove markdown code fences
     if cleaned.startswith("```"):
         lines = [l for l in cleaned.splitlines() if not l.strip().startswith("```")]
         cleaned = "\n".join(lines).strip()
-    # Extract between outermost { }
     if "{" in cleaned and "}" in cleaned:
         start = cleaned.find("{")
         end = cleaned.rfind("}")
@@ -104,8 +114,7 @@ def _normalize_format(text: str) -> str:
 
 
 def validate(text: str) -> tuple[bool, str]:
-    """Returns (passed, reason). Reason is 'ok', 'ok_with_warnings:...',
-    or 'rejected:<why>'."""
+    """Returns (passed, reason)."""
     cleaned = _normalize_format(text)
     if not cleaned:
         return False, "rejected: empty text"
@@ -119,7 +128,7 @@ def validate(text: str) -> tuple[bool, str]:
 
     turns = _split_turns(body)
     if turns is None or len(turns) < 2:
-        return False, "rejected: format_unparseable"
+        return False, "rejected: invalid_speaker_tag"
 
     total_turns = len(turns)
     if total_turns < MIN_TURNS:
@@ -127,7 +136,6 @@ def validate(text: str) -> tuple[bool, str]:
     if total_turns > MAX_TURNS:
         return False, f"rejected: too_many_turns({total_turns})"
 
-    # Drop trailing odd turn (don't reject)
     warnings: list[str] = []
     if total_turns % 2 != 0:
         turns = turns[:-1]
@@ -145,17 +153,18 @@ def validate(text: str) -> tuple[bool, str]:
     for line in aiko_lines:
         low = line.lower()
 
-        # CRITICAL: forbidden address words
         for w in FORBIDDEN_ADDRESS_WORDS:
             if _word_in_text(w, low):
                 return False, f"rejected: forbidden_address('{w}')"
 
-        # CRITICAL: banned slurs
+        for w in FORBIDDEN_SINGLE_P_APP:
+            if _word_in_text(w, low):
+                return False, f"rejected: single_p_app('{w}')"
+
         for w in BANNED_WORDS:
             if _word_in_text(w, low):
                 return False, f"rejected: banned_word('{w}')"
 
-        # CRITICAL: AI references
         for phrase in AI_REFERENCE_PHRASES:
             if phrase in low:
                 return False, f"rejected: ai_reference('{phrase}')"
@@ -164,24 +173,20 @@ def validate(text: str) -> tuple[bool, str]:
     for line in aiko_lines:
         low = line.lower()
 
-        # Emoji count soft cap
         emoji_count = len(EMOJI_PATTERN.findall(line))
         if emoji_count > MAX_EMOJIS_PER_REPLY:
             return False, f"rejected: emoji_overflow({emoji_count})"
         if emoji_count > 5:
             warnings.append(f"emoji_{emoji_count}")
 
-        # Narrator asterisks
         if NARRATOR_PATTERN.search(line):
             warnings.append("narrator")
 
-        # Refusal phrases
         for phrase in REFUSAL_PHRASES:
             if phrase in low:
                 warnings.append("refusal_phrase")
                 break
 
-        # Very short reply
         if len(line.split()) < 2:
             warnings.append("short_aiko_reply")
 
@@ -190,7 +195,6 @@ def validate(text: str) -> tuple[bool, str]:
             warnings.append("short_user_reply")
 
     if warnings:
-        # Deduplicate warnings
         unique = sorted(set(warnings))
         return True, "ok_with_warnings:" + ",".join(unique)
     return True, "ok"
