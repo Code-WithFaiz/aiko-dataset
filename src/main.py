@@ -24,6 +24,7 @@ from src.generator import (
     call_gemini,
     flatten_topics,
     parse_conversation,
+    pick_endings_for_prompt,
 )
 from src.key_rotator import KeyRotator
 
@@ -50,12 +51,20 @@ OPENER_CATEGORIES = [
 TIME_OF_DAY_KEYWORDS = ["subah", "dopahar", "shaam", "raat", "morning", "night", "monday", "weekend", "sunday"]
 
 
-def load_config() -> tuple[str, dict, list[str], list[dict]]:
+def load_config() -> tuple[str, dict, list[str], list[dict], list[dict]]:
+    """Load all config files. Returns (personality, topics, scenarios, openers, endings)."""
     personality_text = (CONFIG_DIR / "personality.md").read_text(encoding="utf-8")
     topics_tree = json.loads((CONFIG_DIR / "topics.json").read_text(encoding="utf-8"))
     scenarios_data = json.loads((CONFIG_DIR / "scenarios.json").read_text(encoding="utf-8"))
     openers_data = json.loads((CONFIG_DIR / "openers.json").read_text(encoding="utf-8"))
-    return personality_text, topics_tree, scenarios_data["scenarios"], openers_data["openers"]
+    endings_data = json.loads((CONFIG_DIR / "endings.json").read_text(encoding="utf-8"))
+    return (
+        personality_text,
+        topics_tree,
+        scenarios_data["scenarios"],
+        openers_data["openers"],
+        endings_data["endings"],
+    )
 
 
 def get_or_build_leaf_order(topics_tree: dict) -> tuple[dict[str, dict], list[str]]:
@@ -118,6 +127,7 @@ def generate_one(
     leaf: dict,
     all_scenarios: list[str],
     all_openers: list[dict],
+    all_endings: list[dict],
     deadline: float | None = None,
 ) -> tuple[str | None, str]:
     """Returns (conversation_text_or_None, reason)."""
@@ -130,7 +140,8 @@ def generate_one(
             return None, "deadline_reached"
         scenarios = pick_scenarios(all_scenarios, leaf, recent_scenarios)
         openers = pick_openers(all_openers)
-        prompt = build_prompt(personality_text, leaf, scenarios, openers)
+        endings = pick_endings_for_prompt(all_endings)
+        prompt = build_prompt(personality_text, leaf, scenarios, openers, endings)
 
         text = _call_with_key_rotation(key_rotator, prompt, deadline=deadline)
         if text is None:
@@ -220,7 +231,7 @@ def run() -> int:
 
 def _run_locked() -> int:
     try:
-        personality_text, topics_tree, all_scenarios, all_openers = load_config()
+        personality_text, topics_tree, all_scenarios, all_openers, all_endings = load_config()
     except (OSError, json.JSONDecodeError) as exc:
         logger.critical("Failed to load config files: %s", exc)
         return 1
@@ -262,7 +273,8 @@ def _run_locked() -> int:
 
         try:
             conversation, reason = generate_one(
-                key_rotator, personality_text, leaf, all_scenarios, all_openers,
+                key_rotator, personality_text, leaf,
+                all_scenarios, all_openers, all_endings,
                 deadline=deadline,
             )
         except Exception as exc:
