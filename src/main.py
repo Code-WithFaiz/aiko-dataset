@@ -43,7 +43,7 @@ CONFIG_DIR = Path("config")
 LOOP_ITERATIONS = int(os.getenv("BATCH_SIZE", "100"))
 BATCH_UPLOAD_THRESHOLD = 15
 DAILY_TARGET = int(os.getenv("DAILY_TARGET", "6700"))
-RUN_DEADLINE_SECONDS = 52 * 60  # graceful shutdown at 42 min
+RUN_DEADLINE_SECONDS = 52 * 60  # graceful shutdown at 52 min
 OPENER_CATEGORIES = [
     "greeting", "question", "reaction", "concern", "playful", "miss",
     "direct", "callback", "mood", "romantic", "teasing", "warm",

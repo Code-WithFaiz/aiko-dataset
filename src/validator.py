@@ -4,7 +4,6 @@ Lenient validator. Hard-fails only on client-critical rules.
 
 Client-critical (HARD REJECT):
   - Aiko uses forbidden address words (tum/tu/tera/teri/...)
-  - Aiko uses single-p "aap" (must be "app")
   - Aiko uses gaali/slurs
   - Aiko claims to be AI/assistant/robot
   - Invalid speaker tag (not "user" or "Aiko")
@@ -14,6 +13,8 @@ Softer issues are accepted with warnings (logged but not rejected):
   - Narrator asterisks
   - Refusal phrases
   - Odd turn count (last turn dropped silently)
+
+Note: "aap" family is allowed now (both "aap" and "app" pass).
 """
 from __future__ import annotations
 
@@ -27,11 +28,7 @@ FORBIDDEN_ADDRESS_WORDS = [
     "tumra", "tera", "raa", "tum chup reho", "tuuna", "baa", "saala",
 ]
 
-# --- CRITICAL: single-p "aap" not allowed in Aiko's lines — must be "app" ---
-FORBIDDEN_SINGLE_P_APP = [
-    "aap", "aapko", "aapki", "aapka", "aapke", "aapne", "aapse",
-    "aapna", "aapni",
-]
+# --- NOTE: "aap" family is now ALLOWED (both "aap" and "app" pass) ---
 
 # --- CRITICAL: Aiko must never claim to be AI ---
 AI_REFERENCE_PHRASES = [
@@ -71,7 +68,7 @@ TURN_BLOCK_PATTERN = re.compile(
 
 MAX_EMOJIS_PER_REPLY = 10
 MIN_TURNS = 8
-MAX_TURNS = 16
+MAX_TURNS = 24
 
 
 def _word_in_text(word: str, text: str) -> bool:
@@ -156,10 +153,6 @@ def validate(text: str) -> tuple[bool, str]:
         for w in FORBIDDEN_ADDRESS_WORDS:
             if _word_in_text(w, low):
                 return False, f"rejected: forbidden_address('{w}')"
-
-        for w in FORBIDDEN_SINGLE_P_APP:
-            if _word_in_text(w, low):
-                return False, f"rejected: single_p_app('{w}')"
 
         for w in BANNED_WORDS:
             if _word_in_text(w, low):
