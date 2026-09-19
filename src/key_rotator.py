@@ -44,7 +44,7 @@ class KeyRotator:
     @staticmethod
     def _load_keys_from_env() -> list[str]:
         keys = []
-        for i in range(1, 17):
+        for i in range(1, 21):
             val = os.getenv(f"GEMINI_KEY_{i}")
             if val:
                 keys.append(val)
