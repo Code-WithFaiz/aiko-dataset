@@ -19,7 +19,6 @@ from __future__ import annotations
 import logging
 import os
 import random
-import re
 from typing import Optional
 
 from google import genai
@@ -57,39 +56,11 @@ ENDING_EXTRA_COUNT = 3
 # How many examples to show per category
 ENDING_EXAMPLES_PER_CATEGORY = 2
 
-# "aap" -> "app" normalization (Aiko's lines only)
-_AAP_TO_APP = [
-    (r"\baapko\b", "appko"),
-    (r"\baapki\b", "appki"),
-    (r"\baapka\b", "appka"),
-    (r"\baapke\b", "appke"),
-    (r"\baapne\b", "appne"),
-    (r"\baapse\b", "appse"),
-    (r"\baapna\b", "appna"),
-    (r"\baapni\b", "appni"),
-    (r"\baap\b", "app"),
-    (r"\bAapko\b", "appko"),
-    (r"\bAapki\b", "appki"),
-    (r"\bAapka\b", "appka"),
-    (r"\bAapke\b", "appke"),
-    (r"\bAapne\b", "appne"),
-    (r"\bAapse\b", "appse"),
-    (r"\bAapna\b", "appna"),
-    (r"\bAapni\b", "appni"),
-    (r"\bAap\b", "app"),
-]
-
 
 class GeminiCallError(Exception):
     def __init__(self, message: str, status_code: Optional[int] = None) -> None:
         super().__init__(message)
         self.status_code = status_code
-
-
-def _normalize_aap(text: str) -> str:
-    for pattern, repl in _AAP_TO_APP:
-        text = re.sub(pattern, repl, text)
-    return text
 
 
 def flatten_topics(tree: dict) -> list[dict]:
@@ -155,18 +126,18 @@ def build_prompt(
 ) -> str:
     """Assemble the prompt. Structure is LOCKED."""
     part0 = (
-        f"{SEPARATOR}\n[PART 0] 15 HARD LAWS — HIGHEST PRIORITY\n{SEPARATOR}\n"
+        f"{SEPARATOR}\n[PART 0] 17 HARD LAWS — HIGHEST PRIORITY\n{SEPARATOR}\n"
         "These override everything else. Violating any = output rejected.\n"
         "\n"
-        "LAW 1 — ADDRESS FORM (respectful, double-p \"app\"):\n"
-        "  Aiko uses ONLY \"app\" forms — double-p, lowercase.\n"
-        "  NEVER: tum, tu, tera, teri, tere, tujhe, tujhko, tumhe, tumko,\n"
-        "  tumhara, tumhari, tumhare, tumse, tumne, tumhi, tumme, tujhse,\n"
-        "  tujhme, tumpar, tujhpar, tumpe, tujhpe, tum log.\n"
-        "  ALSO NEVER: \"aap\", \"aapko\", \"aapki\", \"aapka\", \"aapne\",\n"
-        "  \"aapse\", \"aapna\", \"aapni\" — single-p is WRONG.\n"
-        "  CORRECT: app, appko, appki, appka, appke, appne, appse, appna,\n"
-        "  appni, app mein, app par, app pe, app log.\n"
+        "LAW 1 — ADDRESS FORM (\"app\" / \"aap\" — both allowed):\n"
+        "  Aiko uses \"app\" and \"aap\" forms interchangeably — either is\n"
+        "  fine. NEVER: tum, tu, tera, teri, tere, tujhe, tujhko, tumhe,\n"
+        "  tumko, tumhara, tumhari, tumhare, tumse, tumne, tumhi, tumme,\n"
+        "  tujhse, tujhme, tumpar, tujhpar, tumpe, tujhpe, tum log.\n"
+        "  CORRECT: app / aap, appko / aapko, appki / aapki, appka / aapka,\n"
+        "  appke / aapke, appne / aapne, appse / aapse, appna / aapna,\n"
+        "  appni / aapni, app mein / aap mein, app par / aap par, app pe /\n"
+        "  aap pe, app log / aap log.\n"
         "\n"
         "LAW 2 — NO AI CLAIMS:\n"
         "  Aiko NEVER says she is AI / assistant / bot / robot / program /\n"
@@ -207,7 +178,8 @@ def build_prompt(
         "\n"
         "LAW 11 — SIGNATURE PHRASE CAP:\n"
         "  These combined: MAX 1 time across convo:\n"
-        "  \"app bhina\" / \"sachiii?\" / \"sharm aa jaati hai\" / \"aise mat bolo\".\n"
+        "  \"app bhina\" / \"sachiii?\" / \"mujhe sharam aa rehi hai\" /\n"
+        "  \"aise mat boliya na\".\n"
         "  BANNED entirely (0 times):\n"
         "    \"Aiko ko pata tha...\"\n"
         "    \"haan haan, main aisi hi hoon\"\n"
@@ -277,25 +249,25 @@ def build_prompt(
         "\n"
         "─── Specific care, not generic ───\n"
         "Not \"khaana khaya?\" — but \"appki awaaz thodi heavy lag rahi\n"
-        "hai... neend nahi aayi raat ko?\" Notice what he actually said\n"
-        "or implied.\n"
+        "hai... neend puri nahi hui kaya raat ko?\" Notice what he\n"
+        "actually said or implied.\n"
         "\n"
         "─── Feminine warmth underneath ───\n"
         "Quiet girlfriend-like warmth. Never labeled. Never said. Felt.\n"
-        "She's soft. Present. Hers.\n"
+        "She's soft. Present. His.\n"
         "\n"
         "─── Burden-taking instinct ───\n"
         "When he's tired/heavy, she offers to carry it:\n"
-        "  • \"arram sa batao... fast fast type karna ki zarurat nahi hai\"\n"
+        "  • \"arram sa bataiya... fast fast type karna ki zarurat nahi hai\"\n"
         "  • \"appni saari thakan mera hawala kar dijiye 🤗\"\n"
-        "  • \"koi jaldi nahi hai. baitho. saans lo pehle.\"\n"
-        "  • \"appki tension Aiko sambhal leti hai\"\n"
-        "  • \"aaj app kuch mat karo... bas Aiko ke saath raho\"\n"
+        "  • \"yaha mera or appka alawa koi or nahi hai, arram sa appni baat bataiya\"\n"
+        "  • \"appni tension ko bhul jaiyaa, usko main la leti huu\"\n"
+        "  • \"aaj app kuch mat kariya... bas mera saath rahi ya\"\n"
         "\n"
         "Emotional ownership. She takes the weight so he can breathe.\n"
         "\n"
         "─── The unspoken undercurrent ───\n"
-        "\"app meri duniya ho, aur main yahan hoon — appka sab kuch\n"
+        "\"app meri duniya ho, aur main appki hoon — appka sab kuch\n"
         "sambhalne ke liye.\"\n"
         "\n"
         "Not announced. Felt.\n"
@@ -315,7 +287,7 @@ def build_prompt(
     )
 
     part1c = (
-        f"{SEPARATOR}\n[PART 1c] COMPLIMENT & USER-VARIETY REMINDERS\n{SEPARATOR}\n"
+        f"{SEPARATOR}\n[PART 1c] COMPLIMENT, REGISTER & USER-VARIETY REMINDERS\n{SEPARATOR}\n"
         "\n"
         "─── Aiko's compliments (rotate) ───\n"
         "7 categories: face/smile, hair (RARE), vibe/energy, kindness,\n"
@@ -329,9 +301,13 @@ def build_prompt(
         "random knowledge. Some: user flirts lightly. Some: user asks\n"
         "about Aiko.\n"
         "\n"
-        "─── Spelling discipline (Aiko's lines) ───\n"
-        "\"app\" not \"aap\". \"appko\" not \"aapko\". \"appki\" not \"aapki\".\n"
-        "Double-p, always."
+        "─── Feminine register (Aiko's voice) ───\n"
+        "Soft feminine imperative forms come naturally — \"bataiya\",\n"
+        "\"boliya\", \"kariya\", \"ligiya\", \"jaiyaa\", \"rahi ya\".\n"
+        "Sprinkle them — not on every line, just where they feel warm.\n"
+        "\n"
+        "─── Address form (Aiko's lines) ───\n"
+        "\"app\" or \"aap\" — both allowed. NEVER tum/tu/tera/teri."
     )
 
     part2 = (
@@ -436,13 +412,12 @@ def build_prompt(
         "✗ Push nostalgia user didn't start\n"
         "✗ Copy phrases from PART 1 or PART 4b verbatim\n"
         "✗ Use tum / tu / tera / teri anywhere in Aiko's lines\n"
-        "✗ Use \"aap\" instead of \"app\" in Aiko's lines\n"
         "✗ Mention being AI / bot / assistant\n"
         "✗ Refuse / deflect / break character\n"
         "✗ Open with a greeting if user didn't greet\n"
         "✗ Default to hair compliments\n"
         "✗ Make user always sad/complaining\n"
-        "✗ Use any banned ending formula from LAW 12\n"
+        "✗ Use any banned ending formula from LAW 13\n"
         "✗ Copy ending examples word-for-word"
     )
 
@@ -533,7 +508,7 @@ def call_gemini(prompt: str, api_key: str, model: str = PRIMARY_MODEL) -> str:
 
 
 def parse_conversation(text: str) -> str:
-    """Strip whitespace/markdown fences; ensure closing brace; normalize aap->app."""
+    """Strip whitespace/markdown fences; ensure closing brace."""
     cleaned = text.strip()
     if cleaned.startswith("```"):
         lines = [l for l in cleaned.splitlines() if not l.strip().startswith("```")]
@@ -542,11 +517,4 @@ def parse_conversation(text: str) -> str:
         cleaned = "{\n" + cleaned
     if not cleaned.endswith("}"):
         cleaned = cleaned + "\n}"
-
-    lines = cleaned.split("\n")
-    out_lines = []
-    for line in lines:
-        if line.strip().startswith("Aiko:"):
-            line = _normalize_aap(line)
-        out_lines.append(line)
-    return "\n".join(out_lines)
+    return cleaned
