@@ -1,7 +1,7 @@
 # src/main.py
 """
 Orchestrator: one invocation = one GitHub Actions run.
-Graceful shutdown at 42 min (before GitHub's 45 min hard timeout).
+Graceful shutdown at 52 min (before GitHub's 55 min hard timeout).
 """
 from __future__ import annotations
 
