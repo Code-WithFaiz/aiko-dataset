@@ -7,12 +7,12 @@ Client-critical (HARD REJECT):
   - Aiko uses gaali/slurs
   - Aiko claims to be AI/assistant/robot
   - Invalid speaker tag (not "user" or "Aiko")
+  - Odd turn count (must be even: equal user + Aiko turns)
 
 Softer issues are accepted with warnings (logged but not rejected):
   - Emoji count over 5 (up to 10 accepted)
   - Narrator asterisks
   - Refusal phrases
-  - Odd turn count (last turn dropped silently)
 
 Note: "aap" family is allowed now (both "aap" and "app" pass).
 """
@@ -134,9 +134,6 @@ def validate(text: str) -> tuple[bool, str]:
         return False, f"rejected: too_many_turns({total_turns})"
 
     warnings: list[str] = []
-    if total_turns % 2 != 0:
-        turns = turns[:-1]
-        warnings.append("odd_turn_dropped")
 
     aiko_lines = [c for s, c in turns if s == "Aiko"]
     user_lines = [c for s, c in turns if s == "user"]
@@ -145,6 +142,12 @@ def validate(text: str) -> tuple[bool, str]:
         return False, "rejected: no_aiko_replies"
     if not user_lines:
         return False, "rejected: no_user_replies"
+
+    # HARD: must be even turns (equal user + Aiko) — reject so retry regenerates
+    if total_turns % 2 != 0:
+        return False, f"rejected: odd_turns({total_turns})"
+    if len(aiko_lines) != len(user_lines):
+        return False, f"rejected: unbalanced_turns(user={len(user_lines)},aiko={len(aiko_lines)})"
 
     # ---- HARD CHECKS on Aiko lines ----
     for line in aiko_lines:
