@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import random
+import signal
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -49,6 +50,18 @@ OPENER_CATEGORIES = [
     "direct", "callback", "mood", "romantic", "teasing", "warm",
 ]
 TIME_OF_DAY_KEYWORDS = ["subah", "dopahar", "shaam", "raat", "morning", "night", "monday", "weekend", "sunday"]
+
+# --- Signal handling for graceful shutdown on GitHub cancel ---
+_shutdown_requested = False
+
+
+def _signal_handler(signum, frame):
+    """Set flag when GitHub sends SIGINT/SIGTERM (on cancel/timeout).
+    The main loop checks this flag and exits gracefully, so the run lock
+    gets released and no orphaned lock is left behind in MongoDB."""
+    global _shutdown_requested
+    _shutdown_requested = True
+    logger.warning("Shutdown signal %s received; will stop after current iteration", signum)
 
 
 def load_config() -> tuple[str, dict, list[str], list[dict], list[dict]]:
@@ -178,6 +191,8 @@ def _call_with_key_rotation(
     while True:
         if deadline is not None and time.monotonic() >= deadline:
             return None
+        if _shutdown_requested:
+            return None
         key = key_rotator.wait_for_available_key()
         if key is None:
             logger.critical("All Gemini keys dead")
@@ -227,9 +242,14 @@ def run() -> int:
         return _run_locked()
     finally:
         db.release_run_lock(run_id)
+        logger.info("Run lock released")
 
 
 def _run_locked() -> int:
+    # Register signal handlers so GitHub cancel/timeout triggers graceful shutdown
+    signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
+
     try:
         personality_text, topics_tree, all_scenarios, all_openers, all_endings = load_config()
     except (OSError, json.JSONDecodeError) as exc:
@@ -256,6 +276,14 @@ def _run_locked() -> int:
     graceful_shutdown = False
 
     for i in range(LOOP_ITERATIONS):
+        if _shutdown_requested:
+            logger.info(
+                "Graceful shutdown requested via signal. Flushing %d batched conversations.",
+                len(batch),
+            )
+            graceful_shutdown = True
+            break
+
         elapsed = time.monotonic() - run_start
         if elapsed >= RUN_DEADLINE_SECONDS:
             logger.info(
