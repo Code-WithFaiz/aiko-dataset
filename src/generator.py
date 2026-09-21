@@ -491,12 +491,19 @@ def _extract_text(response) -> str:
 def call_gemini(prompt: str, api_key: str, model: str = PRIMARY_MODEL) -> str:
     client = genai.Client(api_key=api_key)
 
+    config = genai.types.GenerateContentConfig(
+        temperature=TEMPERATURE,
+        top_p=TOP_P,
+        top_k=TOP_K,
+        max_output_tokens=MAX_OUTPUT_TOKENS,
+    )
+
     try:
-        response = client.interactions.create(model=model, input=prompt)
+        response = client.interactions.create(model=model, input=prompt, config=config)
     except Exception as exc:
         status = getattr(exc, "code", None) or getattr(exc, "status_code", None)
         try:
-            response = client.interactions.create(model=model, input=prompt)
+            response = client.interactions.create(model=model, input=prompt, config=config)
         except Exception as exc2:
             status2 = getattr(exc2, "code", None) or getattr(exc2, "status_code", None)
             raise GeminiCallError(str(exc2), status_code=status2 or status) from exc2
