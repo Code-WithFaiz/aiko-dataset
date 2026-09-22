@@ -27,7 +27,7 @@ _client: Optional[MongoClient] = None
 _db: Optional[Database] = None
 
 
-RUN_LOCK_SLOTS = ["1", "2", "3", "4"]
+RUN_LOCK_SLOTS = ["1", "2", "3", "4", "5"]
 RUN_LOCK_TTL_SECONDS = 60 * 60
 SIGNATURE_BUFFER_CAP = 5000
 SCENARIO_BUFFER_CAP = 50
@@ -67,7 +67,7 @@ def _ensure_indexes(db: Database) -> None:
 # ---------- Run lock (concurrency safety) ----------
 
 def acquire_run_lock() -> Optional[str]:
-    """Try any of the 4 slots. Returns lock_id if acquired, else None."""
+    """Try any of the 5 slots. Returns lock_id if acquired, else None."""
     db = get_db()
     run_id = uuid.uuid4().hex
     now = datetime.now(timezone.utc).replace(tzinfo=None)
