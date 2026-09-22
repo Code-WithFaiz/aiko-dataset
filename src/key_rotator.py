@@ -29,7 +29,7 @@ class KeyState:
 
 
 class KeyRotator:
-    """Round-robin rotator over GEMINI_KEY_1..GEMINI_KEY_8."""
+    """Round-robin rotator over GEMINI_KEY_1..GEMINI_KEY_27."""
 
     def __init__(self, keys: Optional[list[str]] = None) -> None:
         if keys is None:
@@ -44,7 +44,7 @@ class KeyRotator:
     @staticmethod
     def _load_keys_from_env() -> list[str]:
         keys = []
-        for i in range(1, 31):
+        for i in range(1, 28):
             val = os.getenv(f"GEMINI_KEY_{i}")
             if val:
                 keys.append(val)
