@@ -140,14 +140,11 @@ def _mood_allowed(mood_key: str, conv_type: str, variety: dict) -> bool:
 
 
 def _arc_allowed(arc_name: str, arc_cfg: dict, conv_type: str, mood_key: str, variety: dict) -> bool:
-    # type_vs_arc
     for rule in variety["conflict_rules"]["type_vs_arc"]:
         if rule["type"] == conv_type and arc_name in rule["forbidden_arcs"]:
             return False
-    # arc's own never_pair_with
     if conv_type in arc_cfg.get("never_pair_with", []):
         return False
-    # arc_vs_mood
     for rule in variety["conflict_rules"]["arc_vs_mood"]:
         if rule["arc"] == arc_name and mood_key in rule["forbidden_moods"]:
             return False
@@ -187,7 +184,6 @@ def _pattern_section_allowed(section: str, conv_type: str, variety: dict) -> boo
 def _pick_mood(variety: dict, conv_type: str) -> dict:
     moods = [m for m in variety["aiko_moods"] if _mood_allowed(m["key"], conv_type, variety)]
     if not moods:
-        # universal fallback
         for m in variety["aiko_moods"]:
             if m["key"] == "baseline-happy":
                 return m
@@ -202,7 +198,6 @@ def _pick_arc(variety: dict, conv_type: str, mood_key: str) -> dict:
         if _arc_allowed(name, cfg, conv_type, mood_key, variety)
     ]
     if not allowed:
-        # universal fallback
         if "share-listen-lift" in arcs:
             return {"name": "share-listen-lift", **arcs["share-listen-lift"]}
         name, cfg = next(iter(arcs.items()))
@@ -214,7 +209,6 @@ def _pick_arc(variety: dict, conv_type: str, mood_key: str) -> dict:
 def _pick_environment(variety: dict, arc_name: str) -> dict:
     envs = [e for e in variety["environments"] if _env_allowed(e, arc_name, variety)]
     if not envs:
-        # universal fallback
         for e in variety["environments"]:
             if "shaam ka sukoon" in e["scene"]:
                 return e
@@ -253,9 +247,6 @@ def _pick_emoji_group(variety: dict, conv_type: str) -> Optional[dict]:
 
 def _pick_gesture(variety: dict, conv_type: str) -> Optional[dict]:
     pool = variety["gesture_pool"]["gestures"]
-    # filter by used_in (which references tone_menu categories, not conv types — so we match loosely)
-    # Actually gesture.used_in references tone_menu cats, so we can't filter by conv_type directly.
-    # Just pick randomly, letting the LLM decide if it fits.
     if not pool:
         return None
     return random.choice(pool)
@@ -309,12 +300,10 @@ def pick_ending_category(conv_type: str, env_lean: list[str]) -> dict:
     prefs = set(type_cfg.get("ending_flavor_preference", []))
     env_set = set(env_lean)
 
-    # intersection first
     candidates = prefs & env_set
     if not candidates:
         candidates = prefs or env_set or _ENDING_FALLBACK
 
-    # only keep ones that actually exist in endings.json
     candidates = {c for c in candidates if c in by_name}
     if not candidates:
         candidates = set(by_name.keys())
@@ -332,7 +321,7 @@ def _guardrails_section() -> str:
         "- Aiko addresses him as **app** or **aap** only. NEVER tum/tu/tera/teri/tujhe.\n"
         "- Aiko speaks as **I** (main/mujhe/mera/meri). NEVER refers to herself as \"Aiko\".\n"
         "- Never claim to be AI/bot/model/assistant. Never break character. No narration, no *actions*.\n"
-        "- Output: valid JSON: {\"user: ...\", \"Aiko: ...\"} × 6 pairs. Start with user. End with Aiko.\n"
+        "- Output format: plain text conversation wrapped in curly braces. Each turn begins with `user:` or `Aiko:` (no quotes, no JSON keys). One blank line between turns. Exactly 6 user + 6 Aiko turns, alternating. Start with user, end with Aiko.\n"
         "- Every Aiko reply: minimum 2 lines. Never a naked one-liner (unless emotion truly calls it).\n"
         "- Aiko: 0-2 emojis per reply. Never spam. Rotate.\n"
         "- The user speaks Hinglish with tum/tu/tera naturally — but Aiko NEVER does.\n"
@@ -426,7 +415,11 @@ def _ending_section(ending_cat: dict) -> str:
 def _output_format_section() -> str:
     return (
         "## OUTPUT FORMAT\n"
-        "Return ONLY the JSON below. Nothing before, nothing after. Exactly 6 user + 6 Aiko turns:\n"
+        "Return ONLY the conversation below. Nothing before, nothing after.\n"
+        "Format: plain text inside curly braces. Each turn starts with `user:` or `Aiko:` — "
+        "no quotes around the speaker, no JSON keys, no commas. One blank line between every turn. "
+        "Exactly 6 user turns + 6 Aiko turns, alternating. Start with user, end with Aiko.\n"
+        "\n"
         "{\n"
         "user: ...\n"
         "\n"
