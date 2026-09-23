@@ -2,6 +2,11 @@
 """
 Orchestrator: one invocation = one GitHub Actions run.
 Graceful shutdown at 52 min (before GitHub's 55 min hard timeout).
+
+Aligned with new generator.py:
+  - Uses pick_tone_category / pick_variety_bundle / pick_ending_category
+  - No scenarios / openers / endings-inline
+  - Personality + variety configs loaded lazily by generator (cached)
 """
 from __future__ import annotations
 
@@ -24,8 +29,11 @@ from src.generator import (
     build_prompt,
     call_gemini,
     flatten_topics,
+    load_category_map,
     parse_conversation,
-    pick_endings_for_prompt,
+    pick_ending_category,
+    pick_tone_category,
+    pick_variety_bundle,
 )
 from src.key_rotator import KeyRotator
 
@@ -44,12 +52,9 @@ CONFIG_DIR = Path("config")
 LOOP_ITERATIONS = int(os.getenv("BATCH_SIZE", "100"))
 BATCH_UPLOAD_THRESHOLD = 15
 DAILY_TARGET = int(os.getenv("DAILY_TARGET", "6700"))
-RUN_DEADLINE_SECONDS = 52 * 60  # graceful shutdown at 52 min
-OPENER_CATEGORIES = [
-    "greeting", "question", "reaction", "concern", "playful", "miss",
-    "direct", "callback", "mood", "romantic", "teasing", "warm",
-]
-TIME_OF_DAY_KEYWORDS = ["subah", "dopahar", "shaam", "raat", "morning", "night", "monday", "weekend", "sunday"]
+RUN_DEADLINE_SECONDS = 52 * 60
+TONE_HISTORY_SIZE = 25
+RATE_LIMIT_COOLDOWN_SECONDS = 90
 
 # --- Signal handling for graceful shutdown on GitHub cancel ---
 _shutdown_requested = False
@@ -64,20 +69,11 @@ def _signal_handler(signum, frame):
     logger.warning("Shutdown signal %s received; will stop after current iteration", signum)
 
 
-def load_config() -> tuple[str, dict, list[str], list[dict], list[dict]]:
-    """Load all config files. Returns (personality, topics, scenarios, openers, endings)."""
-    personality_text = (CONFIG_DIR / "personality.md").read_text(encoding="utf-8")
-    topics_tree = json.loads((CONFIG_DIR / "topics.json").read_text(encoding="utf-8"))
-    scenarios_data = json.loads((CONFIG_DIR / "scenarios.json").read_text(encoding="utf-8"))
-    openers_data = json.loads((CONFIG_DIR / "openers.json").read_text(encoding="utf-8"))
-    endings_data = json.loads((CONFIG_DIR / "endings.json").read_text(encoding="utf-8"))
-    return (
-        personality_text,
-        topics_tree,
-        scenarios_data["scenarios"],
-        openers_data["openers"],
-        endings_data["endings"],
-    )
+# ─────────────────────────────────────────────────────────
+# Config loading — topics only (other configs live in generator)
+# ─────────────────────────────────────────────────────────
+def load_topics() -> dict:
+    return json.loads((CONFIG_DIR / "topics.json").read_text(encoding="utf-8"))
 
 
 def get_or_build_leaf_order(topics_tree: dict) -> tuple[dict[str, dict], list[str]]:
@@ -93,73 +89,54 @@ def get_or_build_leaf_order(topics_tree: dict) -> tuple[dict[str, dict], list[st
     return leaf_by_path, order
 
 
-def pick_scenarios(all_scenarios: list[str], leaf: dict, recent: list[str]) -> list[str]:
-    leaf_text = " ".join(leaf["path"]).lower()
-    topic_implies_time = any(kw in leaf_text for kw in TIME_OF_DAY_KEYWORDS)
-
-    candidates = []
-    for s in all_scenarios:
-        if s in recent:
-            continue
-        if topic_implies_time and any(kw in s.lower() for kw in TIME_OF_DAY_KEYWORDS):
-            continue
-        candidates.append(s)
-    if len(candidates) < 2:
-        candidates = [s for s in all_scenarios if s not in recent] or all_scenarios
-
-    k = min(random.choice([2, 3]), len(candidates))
-    return random.sample(candidates, k)
-
-
-def pick_openers(openers: list[dict]) -> dict[str, str]:
-    by_category: dict[str, list[str]] = {}
-    for o in openers:
-        by_category.setdefault(o["category"], []).append(o["text"])
-
-    chosen: dict[str, str] = {}
-    used: list[tuple[str, str]] = []
-    for category in OPENER_CATEGORIES:
-        pool = by_category.get(category, [])
-        if not pool:
-            continue
-        recent = db.get_recent_openers(category)
-        candidates = [t for t in pool if t not in recent] or pool
-        pick = random.choice(candidates)
-        chosen[category] = pick
-        used.append((category, pick))
-
-    for category, text in used:
-        db.add_used_opener(category, text)
-
-    return chosen
+# ─────────────────────────────────────────────────────────
+# Conversation generation
+# ─────────────────────────────────────────────────────────
+def _track_tone(recent: list[str], cat_name: str) -> None:
+    recent.append(cat_name)
+    if len(recent) > TONE_HISTORY_SIZE:
+        del recent[0 : len(recent) - TONE_HISTORY_SIZE]
 
 
 def generate_one(
     key_rotator: KeyRotator,
-    personality_text: str,
     leaf: dict,
-    all_scenarios: list[str],
-    all_openers: list[dict],
-    all_endings: list[dict],
+    recent_tone_cats: list[str],
     deadline: float | None = None,
 ) -> tuple[str | None, str]:
     """Returns (conversation_text_or_None, reason)."""
-    recent_scenarios = db.get_recent_scenarios()
     recent_signatures = db.get_recent_signatures()
     recent_openings = db.get_recent_openings()
+    category_map = load_category_map()
 
     for attempt in range(1, 4):
         if deadline is not None and time.monotonic() >= deadline:
             return None, "deadline_reached"
-        scenarios = pick_scenarios(all_scenarios, leaf, recent_scenarios)
-        openers = pick_openers(all_openers)
-        endings = pick_endings_for_prompt(all_endings)
-        prompt = build_prompt(personality_text, leaf, scenarios, openers, endings)
 
+        # 1. Pick tone category (avoids recent ones)
+        tone_cat = pick_tone_category(recent_tone_cats)
+        cat_name = tone_cat["category"]
+
+        # 2. Map to conversation type
+        conv_type = category_map.get(cat_name, "playful-banter")
+
+        # 3. Build variety bundle
+        bundle = pick_variety_bundle(conv_type)
+
+        # 4. Pick ending category
+        ending_cat = pick_ending_category(
+            conv_type, bundle["env"].get("ending_lean", [])
+        )
+
+        # 5. Build prompt
+        prompt = build_prompt(leaf, tone_cat, bundle, ending_cat)
+
+        # 6. Call Gemini
         text = _call_with_key_rotation(key_rotator, prompt, deadline=deadline)
         if text is None:
             return None, "all_keys_exhausted"
 
+        # 7. Validate
         conversation = parse_conversation(text)
         ok, reason = validator.validate(conversation)
         if not ok:
@@ -168,20 +145,27 @@ def generate_one(
                 return None, f"rejected_validation:{reason}"
             continue
 
-        is_dup, dup_reason = dedup.is_duplicate(conversation, db.hash_exists, recent_signatures, recent_openings)
+        # 8. Dedup
+        is_dup, dup_reason = dedup.is_duplicate(
+            conversation, db.hash_exists, recent_signatures, recent_openings
+        )
         if is_dup:
             logger.warning("Dedup reject (attempt %d): %s", attempt, dup_reason)
             if attempt == 3:
-                db.add_used_scenarios(scenarios)
+                _track_tone(recent_tone_cats, cat_name)
                 return conversation, "accepted_after_dedup_retries_exhausted"
             continue
 
-        db.add_used_scenarios(scenarios)
+        # 9. Success
+        _track_tone(recent_tone_cats, cat_name)
         return conversation, "ok"
 
     return None, "exhausted_retries"
 
 
+# ─────────────────────────────────────────────────────────
+# Gemini call with key rotation
+# ─────────────────────────────────────────────────────────
 def _call_with_key_rotation(
     key_rotator: KeyRotator, prompt: str, deadline: float | None = None
 ) -> str | None:
@@ -193,11 +177,16 @@ def _call_with_key_rotation(
             return None
         if _shutdown_requested:
             return None
+
         key = key_rotator.wait_for_available_key()
         if key is None:
             logger.critical("All Gemini keys dead")
-            notifier.send_critical_alert("All keys dead", "Every Gemini API key is dead. Manual intervention needed.")
+            notifier.send_critical_alert(
+                "All keys dead",
+                "Every Gemini API key is dead. Manual intervention needed.",
+            )
             return None
+
         try:
             text = call_gemini(prompt, key, model=model)
             key_rotator.mark_success(key)
@@ -205,14 +194,22 @@ def _call_with_key_rotation(
             return text
         except GeminiCallError as exc:
             status = exc.status_code
+
             if status == 429:
                 key_rotator.mark_rate_limited(key)
+                # Persist cooldown to DB so daily report can show it
+                cooldown_until = (
+                    datetime.now(timezone.utc) + timedelta(seconds=RATE_LIMIT_COOLDOWN_SECONDS)
+                ).replace(tzinfo=None)
+                db.update_key_stats(_key_id(key), cooldown_until=cooldown_until)
                 continue
+
             if status in (401, 403):
                 key_rotator.mark_dead(key)
                 db.update_key_stats(_key_id(key), dead=True)
                 logger.warning("Key ...%s unauthorized/invalid, marking dead", key[-4:])
                 continue
+
             if status in (500, 503):
                 server_error_retries += 1
                 if server_error_retries <= 2:
@@ -223,6 +220,7 @@ def _call_with_key_rotation(
                     server_error_retries = 0
                     continue
                 return None
+
             logger.error("Gemini call failed: %s", exc)
             return None
 
@@ -232,6 +230,9 @@ def _key_id(key: str) -> str:
     return f"key_{hashlib.sha256(key.encode()).hexdigest()[:12]}"
 
 
+# ─────────────────────────────────────────────────────────
+# Run orchestration
+# ─────────────────────────────────────────────────────────
 def run() -> int:
     logger.info("=== Aiko generator run starting ===")
     run_id = db.acquire_run_lock()
@@ -246,14 +247,13 @@ def run() -> int:
 
 
 def _run_locked() -> int:
-    # Register signal handlers so GitHub cancel/timeout triggers graceful shutdown
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
 
     try:
-        personality_text, topics_tree, all_scenarios, all_openers, all_endings = load_config()
+        topics_tree = load_topics()
     except (OSError, json.JSONDecodeError) as exc:
-        logger.critical("Failed to load config files: %s", exc)
+        logger.critical("Failed to load topics.json: %s", exc)
         return 1
 
     try:
@@ -271,6 +271,7 @@ def _run_locked() -> int:
     batch: list[str] = []
     generated = 0
     rejected = 0
+    recent_tone_cats: list[str] = []
     run_start = time.monotonic()
     deadline = run_start + RUN_DEADLINE_SECONDS
     graceful_shutdown = False
@@ -301,9 +302,7 @@ def _run_locked() -> int:
 
         try:
             conversation, reason = generate_one(
-                key_rotator, personality_text, leaf,
-                all_scenarios, all_openers, all_endings,
-                deadline=deadline,
+                key_rotator, leaf, recent_tone_cats, deadline=deadline,
             )
         except Exception as exc:
             logger.error("Unexpected error generating conversation %d: %s", i, exc)
