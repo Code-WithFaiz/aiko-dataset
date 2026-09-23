@@ -1,16 +1,12 @@
 # src/generator.py
 """
-Core generation logic — optimized.
+Core generation logic — slim prompt, strong rules, deterministic variant pick.
 
-Pipeline:
-  1. Load configs (cached once, @lru_cache)
-  2. Pick tone category (51 options, random)
-  3. Map to conversation_type (category_mapping.json)
-  4. Pick variety bundle (mood, arc, env, pattern, vibes, emoji, gesture, shape)
-  5. Pick ending category (filtered by type preference + env lean)
-  6. Build prompt from TONE HINTS only — no phrases, no examples
-  7. Call Gemini
-  8. Parse & return
+Design:
+  - Prompt ~1200 tokens (was ~3500)
+  - Variant picked at BUILD time (not by LLM) → smaller prompt, no choice overload
+  - Hard rules FIRST, explicit forbidden words
+  - Ending avoid-list to kill monotony
 """
 from __future__ import annotations
 
@@ -26,9 +22,6 @@ from google import genai
 
 logger = logging.getLogger(__name__)
 
-# ─────────────────────────────────────────────────────────
-# Constants
-# ─────────────────────────────────────────────────────────
 CONFIG_DIR = Path("config")
 
 PRIMARY_MODEL = "gemini-3.5-flash-lite"
@@ -36,11 +29,10 @@ FALLBACK_MODEL = "gemini-3.5-flash"
 TEMPERATURE = float(os.getenv("TEMPERATURE", "1.1"))
 TOP_P = 0.95
 TOP_K = 40
-MAX_OUTPUT_TOKENS = 3000
+MAX_OUTPUT_TOKENS = 1800
 
 PLAYFUL_TYPES = {"playful-banter", "teasing-nakhra", "silly-random", "flirty-light"}
 
-# All 15 ending categories (used as final fallback)
 _ENDING_FALLBACK = {
     "soft-goodnight", "gentle-exit", "tomorrow-hook", "warm-reassurance",
     "playful-exit", "emotional-close", "question-linger", "callback-future",
@@ -56,7 +48,7 @@ class GeminiCallError(Exception):
 
 
 # ─────────────────────────────────────────────────────────
-# Config loaders (cached once per process)
+# Config loaders
 # ─────────────────────────────────────────────────────────
 @lru_cache(maxsize=None)
 def load_variety() -> dict:
@@ -85,10 +77,9 @@ def load_personality() -> str:
 
 
 # ─────────────────────────────────────────────────────────
-# Topic flattening (unchanged)
+# Topic flattening
 # ─────────────────────────────────────────────────────────
 def flatten_topics(tree: dict) -> list[dict]:
-    """DFS-flatten topics.json into leaf records."""
     leaves: list[dict] = []
 
     def walk(node: dict, path: list[str], definitions: list[str]) -> None:
@@ -117,12 +108,9 @@ def flatten_topics(tree: dict) -> list[dict]:
 # Tone category picking
 # ─────────────────────────────────────────────────────────
 def pick_tone_category(recent: Optional[list[str]] = None) -> dict:
-    """Pick ONE tone category (from 51), avoiding recent ones.
-    Returns the full category dict (with variants)."""
     tone_menu = load_tone_menu()
     cats = tone_menu["categories"]
     recent = set(recent or [])
-
     candidates = [c for c in cats if c["category"] not in recent]
     if not candidates:
         candidates = cats
@@ -130,7 +118,7 @@ def pick_tone_category(recent: Optional[list[str]] = None) -> dict:
 
 
 # ─────────────────────────────────────────────────────────
-# Variety bundle picking
+# Conflict-filter helpers
 # ─────────────────────────────────────────────────────────
 def _mood_allowed(mood_key: str, conv_type: str, variety: dict) -> bool:
     for rule in variety["conflict_rules"]["type_vs_mood"]:
@@ -228,7 +216,7 @@ def _pick_playful_pattern(variety: dict, conv_type: str) -> Optional[dict]:
     return {"section": section, **item}
 
 
-def _pick_reaction_vibes(variety: dict, conv_type: str, n: int = 3) -> list[dict]:
+def _pick_reaction_vibes(variety: dict, conv_type: str, n: int = 2) -> list[dict]:
     vibes = [v for v in variety["reaction_vibes"] if _vibe_allowed(v, conv_type, variety)]
     if not vibes:
         vibes = variety["reaction_vibes"]
@@ -258,20 +246,16 @@ def _pick_response_shape(variety: dict) -> dict:
 
 
 def pick_variety_bundle(conv_type: str) -> dict:
-    """Pick a full variety bundle for one generation."""
     variety = load_variety()
-
     mood = _pick_mood(variety, conv_type)
     arc = _pick_arc(variety, conv_type, mood["key"])
     env = _pick_environment(variety, arc["name"])
     pattern = _pick_playful_pattern(variety, conv_type)
-    vibes = _pick_reaction_vibes(variety, conv_type, n=3)
+    vibes = _pick_reaction_vibes(variety, conv_type, n=2)
     emoji = _pick_emoji_group(variety, conv_type)
     gesture = _pick_gesture(variety, conv_type)
     shape = _pick_response_shape(variety)
-
     type_cfg = variety["conversation_types"].get(conv_type, {})
-
     return {
         "type": conv_type,
         "type_cfg": type_cfg,
@@ -290,138 +274,104 @@ def pick_variety_bundle(conv_type: str) -> dict:
 # Ending picking
 # ─────────────────────────────────────────────────────────
 def pick_ending_category(conv_type: str, env_lean: list[str]) -> dict:
-    """Pick ONE ending category, filtered by type preference + env lean."""
     endings = load_endings()
     cats = endings["categories"]
     by_name = {c["category"]: c for c in cats}
-
     variety = load_variety()
     type_cfg = variety["conversation_types"].get(conv_type, {})
     prefs = set(type_cfg.get("ending_flavor_preference", []))
     env_set = set(env_lean)
-
     candidates = prefs & env_set
     if not candidates:
         candidates = prefs or env_set or _ENDING_FALLBACK
-
     candidates = {c for c in candidates if c in by_name}
     if not candidates:
         candidates = set(by_name.keys())
-
     picked = random.choice(list(candidates))
     return by_name[picked]
 
 
 # ─────────────────────────────────────────────────────────
-# Prompt building
+# Prompt sections — SLIM
 # ─────────────────────────────────────────────────────────
 def _guardrails_section() -> str:
     return (
-        "## GUARDRAILS — hard rules for this output\n"
-        "- Aiko addresses him as **app** or **aap** only. NEVER tum/tu/tera/teri/tujhe.\n"
-        "- Aiko speaks as **I** (main/mujhe/mera/meri). NEVER refers to herself as \"Aiko\".\n"
-        "- Never claim to be AI/bot/model/assistant. Never break character. No narration, no *actions*.\n"
-        "- Output format: plain text conversation wrapped in curly braces. Each turn begins with `user:` or `Aiko:` (no quotes, no JSON keys). One blank line between turns. Exactly 6 user + 6 Aiko turns, alternating. Start with user, end with Aiko.\n"
-        "- Every Aiko reply: minimum 2 lines. Never a naked one-liner (unless emotion truly calls it).\n"
-        "- Aiko: 0-2 emojis per reply. Never spam. Rotate.\n"
-        "- The user speaks Hinglish with tum/tu/tera naturally — but Aiko NEVER does.\n"
-        "- Do NOT copy any phrasing from this prompt. Invent fresh words every line."
+        "## HARD RULES (never break)\n"
+        "1. Aiko uses 'app' or 'aap' ONLY. FORBIDDEN words (never write): tum, tu, tumhe, tumko, tumhara, tumhari, tumhare, tumse, tumne, tera, teri, tere, tujhe, tujhko, tujhse. RULE: if a word starts with 'tum', 'tu', or 'ter' — STOP and rewrite it with 'app' form.\n"
+        "2. Aiko speaks as 'I' — main, mujhe, mera, meri, mujhse. NEVER refer to herself as 'Aiko'.\n"
+        "3. Never say you are AI, bot, model, assistant, or program. Never break character. No *actions*, no narration.\n"
+        "4. Emoji: 0-2 per Aiko reply. NEVER an emoji-only reply. NEVER the same emoji twice in one conversation.\n"
+        "5. Every Aiko reply is minimum 2 lines — reaction + warmth + small hook.\n"
+        "6. Do NOT copy any phrasing from this prompt. Invent fresh words every line."
     )
 
 
 def _tone_section(tone_cat: dict) -> str:
     variants = tone_cat.get("variants", [])
-    lines = [f"## OPENING TONE — {tone_cat['category']}", f"When: {tone_cat['when']}",
-             "Pick ONE variant below that fits the moment:"]
-    for i, v in enumerate(variants, 1):
-        emojis = " ".join(v.get("emoji_lean", []))
-        lines.append(f"  {i}. {v['tone']}")
-        lines.append(f"     → {v['behavior']}")
-        if emojis:
-            lines.append(f"     → lean emojis: {emojis}")
-    return "\n".join(lines)
+    if not variants:
+        return ""
+    v = random.choice(variants)
+    return (
+        "## THE OPENING MOMENT\n"
+        f"Situation: {tone_cat['when']}\n"
+        f"Her first move: {v['tone']}\n"
+        f"Style: {v['behavior']}"
+    )
 
 
 def _bundle_section(bundle: dict) -> str:
     b = bundle
+    lines = ["## THIS CONVERSATION"]
     type_cfg = b["type_cfg"]
-    lines = [f"## VARIETY BUNDLE"]
-
-    lines.append(f"Conversation type: {b['type']}")
     if type_cfg.get("aiko_tone"):
-        lines.append(f"  → {type_cfg['aiko_tone']}")
+        lines.append(f"- Overall tone: {type_cfg['aiko_tone']}")
     if type_cfg.get("length"):
-        lines.append(f"  → length: {type_cfg['length']}")
-
-    m = b["mood"]
-    lines.append(f"Aiko mood: {m['mood']}")
-    lines.append(f"  → shift: {m['shift']}")
-
-    a = b["arc"]
-    lines.append(f"Arc: {a['shape']}")
-    lines.append(f"  → beats: {' → '.join(a['beats'])}")
-    lines.append(f"  → pace: {a['pace']}")
-
-    e = b["env"]
-    lines.append(f"Environment: {e['scene']}")
-    lines.append(f"  → feel: {e['feel']}")
-
+        lines.append(f"- Reply length: {type_cfg['length']}")
+    lines.append(f"- Her mood: {b['mood']['mood']} → {b['mood']['shift']}")
+    lines.append(f"- Chat flow: {b['arc']['shape']}")
+    lines.append(f"- Setting: {b['env']['scene']} — {b['env']['feel']}")
     if b["pattern"]:
-        p = b["pattern"]
-        lines.append(f"Playful pattern: {p['name']}")
-        lines.append(f"  → {p['feel']}")
-
-    lines.append("Reaction vibes (use as tone hints, not as phrases):")
-    for v in b["vibes"]:
-        lines.append(f"  → {v['feel']}  (never: {v.get('never_overdo', '')})")
-
-    if b["emoji"]:
-        eg = b["emoji"]
-        lines.append(f"Emoji lean: {eg['when']} → {''.join(eg['emojis'][:6])}")
-
+        lines.append(f"- Playful dynamic: {b['pattern']['feel']}")
+    if b["vibes"]:
+        lines.append(f"- Reaction energy: {'; '.join(v['feel'] for v in b['vibes'])}")
     if b["gesture"]:
-        g = b["gesture"]
-        lines.append(f"Gesture (optional, only if it fits): {g['gesture']} — {g['feel']}")
-
-    s = b["shape"]
-    lines.append(f"Response shape: {s['feel']}")
-    lines.append(f"  → use when: {s['use_when']}")
-
+        lines.append(f"- Small gesture (optional): {b['gesture']['gesture']}")
+    if b["shape"]:
+        lines.append(f"- Reply shape: {b['shape']['feel']}")
     return "\n".join(lines)
 
 
 def _topic_section(leaf: dict) -> str:
     return (
-        "## TOPIC (background mood only — do NOT force topic nouns)\n"
-        f"Core: {leaf['core_topic']}\n"
-        f"Definition: {leaf['core_definition']}\n"
-        f"Path: {leaf['main_subtopics_string']}"
+        "## BACKGROUND THEME (shape the mood only — do NOT name it)\n"
+        f"{leaf['core_topic']} — {leaf['core_definition']}"
     )
 
 
 def _ending_section(ending_cat: dict) -> str:
     variants = ending_cat.get("variants", [])
-    lines = [f"## ENDING COLOR — {ending_cat['category']}", f"When: {ending_cat['when']}",
-             "Pick ONE variant below for the LAST Aiko reply. Write it fresh — never copy the tone description word-for-word:"]
-    for i, v in enumerate(variants, 1):
-        emojis = " ".join(v.get("emoji_lean", []))
-        lines.append(f"  {i}. {v['tone']}")
-        lines.append(f"     → {v['behavior']}")
-        if emojis:
-            lines.append(f"     → lean emojis: {emojis}")
-    return "\n".join(lines)
+    if not variants:
+        return ""
+    v = random.choice(variants)
+    return (
+        "## HOW IT ENDS\n"
+        f"Situation: {ending_cat['when']}\n"
+        f"Her last move: {v['tone']}\n"
+        f"Style: {v['behavior']}\n"
+        f"AVOID these closers (overused): 'so jao', 'aankh band karo', 'main hoon na', 'bojh hawale karo', 'good night app', 'subah milte hain', 'apna khayal rakhna', 'chup chaap so jao'."
+    )
 
 
 def _output_format_section() -> str:
     return (
         "## OUTPUT FORMAT\n"
-        "Return ONLY the conversation. No explanation, no headers, no commentary. Nothing before, nothing after.\n"
-        "\n"
-        "Exactly 12 turns: 6 user + 6 Aiko, strictly alternating. Start with user, end with Aiko.\n"
-        "Every turn begins on its own line with `user: ` or `Aiko: ` (no quotes, no JSON). "
-        "Leave ONE blank line between turns.\n"
-        "\n"
-        "Begin your reply with `{` and end it with `}`. Inside, write the conversation as described."
+        "Reply with ONLY the conversation. No intro, no closing, no explanation.\n"
+        "- Wrap everything in { and }.\n"
+        "- Every turn on its own line, starting with 'user: ' or 'Aiko: '.\n"
+        "- One blank line between turns.\n"
+        "- Exactly 12 turns: 6 user + 6 Aiko, alternating.\n"
+        "- First turn is user. Last turn is Aiko.\n"
+        "- No quotes around the speaker tags."
     )
 
 
@@ -431,23 +381,20 @@ def build_prompt(
     bundle: dict,
     ending_cat: dict,
 ) -> str:
-    """Assemble the full prompt for one generation."""
     personality = load_personality()
-
-    sections = [
+    return "\n\n".join([
         _guardrails_section(),
-        f"## AIKO'S SOUL\n\n{personality}",
+        personality,
         _tone_section(tone_cat),
         _bundle_section(bundle),
         _topic_section(leaf),
         _ending_section(ending_cat),
         _output_format_section(),
-    ]
-    return "\n\n".join(sections)
+    ])
 
 
 # ─────────────────────────────────────────────────────────
-# Gemini call (unchanged)
+# Gemini call
 # ─────────────────────────────────────────────────────────
 def _extract_text(response) -> str:
     for attr in ("output_text", "text", "content", "output"):
@@ -480,7 +427,6 @@ def _extract_text(response) -> str:
 
 def call_gemini(prompt: str, api_key: str, model: str = PRIMARY_MODEL) -> str:
     client = genai.Client(api_key=api_key)
-
     try:
         response = client.interactions.create(model=model, input=prompt)
     except Exception as exc:
@@ -498,13 +444,7 @@ def call_gemini(prompt: str, api_key: str, model: str = PRIMARY_MODEL) -> str:
 
 
 def parse_conversation(text: str) -> str:
-    """Normalize LLM output to canonical plain-text format.
-
-    Accepts both:
-      - user: text  (plain)
-      - "user": "text"  (JSON-ish)
-    Returns canonical: { user: ... \\n\\n Aiko: ... }
-    """
+    """Normalize LLM output to canonical plain-text format."""
     import re as _re
 
     cleaned = text.strip()
@@ -535,7 +475,6 @@ def parse_conversation(text: str) -> str:
             )
             if content:
                 parts.append(f"{speaker}: {content}")
-
         if parts:
             return "{\n" + "\n\n".join(parts) + "\n}"
 
