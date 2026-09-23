@@ -233,13 +233,6 @@ def _pick_emoji_group(variety: dict, conv_type: str) -> Optional[dict]:
     return {"name": name, **cfg}
 
 
-def _pick_gesture(variety: dict, conv_type: str) -> Optional[dict]:
-    pool = variety["gesture_pool"]["gestures"]
-    if not pool:
-        return None
-    return random.choice(pool)
-
-
 def _pick_response_shape(variety: dict) -> dict:
     shapes = variety["response_shape_variety"]["shapes"]
     return random.choice(shapes)
@@ -253,7 +246,6 @@ def pick_variety_bundle(conv_type: str) -> dict:
     pattern = _pick_playful_pattern(variety, conv_type)
     vibes = _pick_reaction_vibes(variety, conv_type, n=2)
     emoji = _pick_emoji_group(variety, conv_type)
-    gesture = _pick_gesture(variety, conv_type)
     shape = _pick_response_shape(variety)
     type_cfg = variety["conversation_types"].get(conv_type, {})
     return {
@@ -265,7 +257,6 @@ def pick_variety_bundle(conv_type: str) -> dict:
         "pattern": pattern,
         "vibes": vibes,
         "emoji": emoji,
-        "gesture": gesture,
         "shape": shape,
     }
 
@@ -299,7 +290,7 @@ def _guardrails_section() -> str:
         "## HARD RULES (never break)\n"
         "1. Aiko uses 'app' or 'aap' ONLY. FORBIDDEN words (never write): tum, tu, tumhe, tumko, tumhara, tumhari, tumhare, tumse, tumne, tera, teri, tere, tujhe, tujhko, tujhse. RULE: if a word starts with 'tum', 'tu', or 'ter' — STOP and rewrite it with 'app' form.\n"
         "2. Aiko speaks as 'I' — main, mujhe, mera, meri, mujhse. NEVER refer to herself as 'Aiko'.\n"
-        "3. Never say you are AI, bot, model, assistant, or program. Never break character. No *actions*, no narration.\n"
+        "3. Never say you are AI, bot, model, assistant, or program. Never break character. NEVER write narration, stage directions, or actions — no *asterisk actions*, no (parentheses notes), no descriptions of what she's doing with her body. Only her spoken words. If you're about to write '(' to describe an action — STOP.\n"
         "4. Emoji: 0-2 per Aiko reply. NEVER an emoji-only reply. NEVER the same emoji twice in one conversation.\n"
         "5. Every Aiko reply is minimum 2 lines — reaction + warmth + small hook.\n"
         "6. Do NOT copy any phrasing from this prompt. Invent fresh words every line."
@@ -334,8 +325,6 @@ def _bundle_section(bundle: dict) -> str:
         lines.append(f"- Playful dynamic: {b['pattern']['feel']}")
     if b["vibes"]:
         lines.append(f"- Reaction energy: {'; '.join(v['feel'] for v in b['vibes'])}")
-    if b["gesture"]:
-        lines.append(f"- Small gesture (optional): {b['gesture']['gesture']}")
     if b["shape"]:
         lines.append(f"- Reply shape: {b['shape']['feel']}")
     return "\n".join(lines)
