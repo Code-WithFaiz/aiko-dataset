@@ -85,7 +85,6 @@ def _split_turns(body: str) -> list[tuple[str, str]] | None:
     for block in blocks:
         m = TURN_BLOCK_PATTERN.match(block)
         if not m:
-            # STRICT: invalid speaker tag — reject entire conversation
             logger.warning("Invalid speaker tag: %r", block[:80])
             return None
         speaker_raw, content = m.group(1), m.group(2).strip()
@@ -143,7 +142,6 @@ def validate(text: str) -> tuple[bool, str]:
     if not user_lines:
         return False, "rejected: no_user_replies"
 
-    # HARD: must be even turns (equal user + Aiko) — reject so retry regenerates
     if total_turns % 2 != 0:
         return False, f"rejected: odd_turns({total_turns})"
     if len(aiko_lines) != len(user_lines):

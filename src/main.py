@@ -197,7 +197,6 @@ def _call_with_key_rotation(
 
             if status == 429:
                 key_rotator.mark_rate_limited(key)
-                # Persist cooldown to DB so daily report can show it
                 cooldown_until = (
                     datetime.now(timezone.utc) + timedelta(seconds=RATE_LIMIT_COOLDOWN_SECONDS)
                 ).replace(tzinfo=None)
@@ -210,7 +209,7 @@ def _call_with_key_rotation(
                 logger.warning("Key ...%s unauthorized/invalid, marking dead", key[-4:])
                 continue
 
-                        if status in (500, 503):
+            if status in (500, 503):
                 server_error_retries += 1
                 if server_error_retries <= 2:
                     wait_seconds = 60 if server_error_retries == 1 else 90
@@ -226,6 +225,10 @@ def _call_with_key_rotation(
                     logger.info("Switching to FALLBACK_MODEL: %s", model)
                     continue
                 return None
+
+            logger.error("Gemini call failed: %s", exc)
+            return None
+
 
 def _key_id(key: str) -> str:
     """Stable key ID for MongoDB tracking."""

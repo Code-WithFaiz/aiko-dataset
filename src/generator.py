@@ -521,11 +521,47 @@ def call_gemini(prompt: str, api_key: str, model: str = PRIMARY_MODEL) -> str:
 
 
 def parse_conversation(text: str) -> str:
-    """Strip whitespace/markdown fences; ensure closing brace."""
+    """Normalize LLM output to canonical plain-text format.
+
+    Accepts both:
+      - user: text  (plain)
+      - "user": "text"  (JSON-ish)
+    Returns canonical: { user: ... \\n\\n Aiko: ... }
+    """
+    import re as _re
+
     cleaned = text.strip()
     if cleaned.startswith("```"):
         lines = [l for l in cleaned.splitlines() if not l.strip().startswith("```")]
         cleaned = "\n".join(lines).strip()
+
+    if cleaned.startswith("{"):
+        cleaned = cleaned[1:]
+    if cleaned.endswith("}"):
+        cleaned = cleaned[:-1]
+    cleaned = cleaned.strip()
+
+    if _re.search(r'"\s*(user|Aiko)\s*"\s*:', cleaned, _re.IGNORECASE):
+        pattern = _re.compile(
+            r'"\s*(user|Aiko)\s*"\s*:\s*"((?:[^"\\]|\\.)*)"',
+            flags=_re.DOTALL | _re.IGNORECASE,
+        )
+        matches = pattern.findall(cleaned)
+        parts: list[str] = []
+        for speaker_raw, content in matches:
+            speaker = "user" if speaker_raw.lower() == "user" else "Aiko"
+            content = (
+                content.replace("\\n", "\n")
+                .replace('\\"', '"')
+                .replace("\\'", "'")
+                .strip()
+            )
+            if content:
+                parts.append(f"{speaker}: {content}")
+
+        if parts:
+            return "{\n" + "\n\n".join(parts) + "\n}"
+
     if not cleaned.startswith("{"):
         cleaned = "{\n" + cleaned
     if not cleaned.endswith("}"):
