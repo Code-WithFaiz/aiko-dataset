@@ -210,20 +210,22 @@ def _call_with_key_rotation(
                 logger.warning("Key ...%s unauthorized/invalid, marking dead", key[-4:])
                 continue
 
-            if status in (500, 503):
+                        if status in (500, 503):
                 server_error_retries += 1
                 if server_error_retries <= 2:
-                    time.sleep(5)
+                    wait_seconds = 60 if server_error_retries == 1 else 90
+                    logger.warning(
+                        "Gemini %d on %s. Retry %d/2 in %ds.",
+                        status, model, server_error_retries, wait_seconds,
+                    )
+                    time.sleep(wait_seconds)
                     continue
                 if model == PRIMARY_MODEL:
                     model = FALLBACK_MODEL
                     server_error_retries = 0
+                    logger.info("Switching to FALLBACK_MODEL: %s", model)
                     continue
                 return None
-
-            logger.error("Gemini call failed: %s", exc)
-            return None
-
 
 def _key_id(key: str) -> str:
     """Stable key ID for MongoDB tracking."""
