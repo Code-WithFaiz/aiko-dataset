@@ -2480,3 +2480,94 @@ if __name__ == "__main__":
 #| else:
 #|     log("  matrix line not found / already 6, skipping")
 #@@ END
+# ============================= PART 8 =============================
+
+#@@ FUNC src/validator.py process
+#| def process(text: str) -> dict:
+#|     cfg = _cfg()
+#|     res = {"ok": False, "reason": "", "flags": [], "fixes": 0, "turns": [], "text": ""}
+#|
+#|     def bad(reason):
+#|         res["reason"] = reason
+#|         return res
+#|
+#|     turns = parse_turns(text or "")
+#|     if not turns:
+#|         return bad("invalid_format")
+#|     n = len(turns)
+#|
+#|     if n % 2 and turns[-1][0] == "user":
+#|         turns = turns[:-1]
+#|         n -= 1
+#|
+#|     if n < MIN_TURNS:
+#|         return bad("too_few_turns(%d)" % n)
+#|     if n > MAX_TURNS:
+#|         return bad("too_many_turns(%d)" % n)
+#|     if n % 2:
+#|         return bad("odd_turns(%d)" % n)
+#|     for i, (spk, _) in enumerate(turns):
+#|         if spk != ("user" if i % 2 == 0 else "Aiko"):
+#|             return bad("bad_alternation(turn %d)" % i)
+#|
+#|     for spk, c in turns:
+#|         low = c.lower()
+#|         if any(rx.search(low) for rx in cfg["abuse_hard"]):
+#|             return bad("abuse")
+#|         if spk != "Aiko":
+#|             continue
+#|         if any(rx.search(low) for rx in cfg["abuse_aiko"]):
+#|             return bad("abuse_aiko")
+#|         if any(rx.search(low) for rx in cfg["human"]):
+#|             return bad("human_claim")
+#|         if any(rx.search(low) for rx in cfg["deny_ai"]):
+#|             return bad("denies_ai")
+#|         if any(p in low for p in AI_PHRASES):
+#|             return bad("claims_ai")
+#|
+#|     fixed, fixes, empty_turns = [], 0, 0
+#|     for spk, c in turns:
+#|         if spk == "Aiko":
+#|             c, k1 = fix_address(c)
+#|             c, k2 = fix_emoji(c, cfg["emoji_max"])
+#|             fixes += k1 + k2
+#|             if not LETTER_RE.search(EMOJI_RE.sub("", c)):
+#|                 empty_turns += 1
+#|         fixed.append((spk, c))
+#|
+#|     # One stray emoji-only turn happens occasionally and the rest of the
+#|     # conversation is usually fine -- only reject when it's a real pattern
+#|     # (2 or more empty turns), not a single glitch.
+#|     if empty_turns >= 2:
+#|         return bad("emoji_only_turns(%d)" % empty_turns)
+#|
+#|     aiko = [c for s, c in fixed if s == "Aiko"]
+#|     line_counts = [_nlines(c) for c in aiko]
+#|     avg_lines = sum(line_counts) / len(line_counts)
+#|     best_turn = max(line_counts)
+#|     if best_turn < 3:
+#|         return bad("no_turn_reaches_min_length(best=%d)" % best_turn)
+#|
+#|     flags = []
+#|     if empty_turns:
+#|         flags.append("emoji_only_turn_once")
+#|     if avg_lines < cfg["min_lines"] - 1:
+#|         flags.append("aiko_short(avg=%.1f)" % avg_lines)
+#|     total_emoji = sum(len(EMOJI_RE.findall(c)) for c in aiko)
+#|     if total_emoji < 0.8 * cfg["emoji_avg"] * len(aiko):
+#|         flags.append("emoji_low(%d)" % total_emoji)
+#|     joined = "\n".join(aiko)
+#|     for rx in cfg["scene"]:
+#|         if rx.search(joined):
+#|             flags.append("scene:" + rx.pattern[:24])
+#|     for rx in cfg["over"]:
+#|         if len(rx.findall(joined)) > cfg["over_max"]:
+#|             flags.append("overused:" + rx.pattern[:16])
+#|     if NARRATOR_RE.search(joined) or PAREN_RE.search(joined):
+#|         flags.append("narration")
+#|     if any(p in joined.lower() for p in REFUSAL_PHRASES):
+#|         flags.append("refusal")
+#|
+#|     res.update(ok=True, reason="ok", flags=flags, fixes=fixes, turns=fixed, text=render(fixed))
+#|     return res
+#@@ END

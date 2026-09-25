@@ -206,20 +206,22 @@ def process(text: str) -> dict:
         if any(p in low for p in AI_PHRASES):
             return bad("claims_ai")
 
-    fixed, fixes = [], 0
+    fixed, fixes, empty_turns = [], 0, 0
     for spk, c in turns:
         if spk == "Aiko":
             c, k1 = fix_address(c)
             c, k2 = fix_emoji(c, cfg["emoji_max"])
             fixes += k1 + k2
             if not LETTER_RE.search(EMOJI_RE.sub("", c)):
-                return bad("emoji_only_turn")
+                empty_turns += 1
         fixed.append((spk, c))
 
-    # Lenient by design: only reject if NOT EVEN ONE Aiko turn in the whole
-    # conversation reaches a real length. A couple of short turns mixed in
-    # with longer ones is fine and normal texting -- only an entirely flat,
-    # one-line-everywhere conversation gets rejected.
+    # One stray emoji-only turn happens occasionally and the rest of the
+    # conversation is usually fine -- only reject when it's a real pattern
+    # (2 or more empty turns), not a single glitch.
+    if empty_turns >= 2:
+        return bad("emoji_only_turns(%d)" % empty_turns)
+
     aiko = [c for s, c in fixed if s == "Aiko"]
     line_counts = [_nlines(c) for c in aiko]
     avg_lines = sum(line_counts) / len(line_counts)
@@ -228,6 +230,8 @@ def process(text: str) -> dict:
         return bad("no_turn_reaches_min_length(best=%d)" % best_turn)
 
     flags = []
+    if empty_turns:
+        flags.append("emoji_only_turn_once")
     if avg_lines < cfg["min_lines"] - 1:
         flags.append("aiko_short(avg=%.1f)" % avg_lines)
     total_emoji = sum(len(EMOJI_RE.findall(c)) for c in aiko)
