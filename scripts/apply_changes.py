@@ -2398,3 +2398,85 @@ if __name__ == "__main__":
 #| else:
 #|     log("  matrix line not found / already changed, skipping")
 #@@ END
+# ============================= PART 7 =============================
+
+#@@ FUNC src/main.py generate_one
+#| def generate_one(
+#|     key_rotator: KeyRotator,
+#|     leaf: dict,
+#|     recent_tone_cats: list[str],
+#|     deadline: float | None = None,
+#| ) -> tuple[str | None, str, list[str]]:
+#|     """Returns (conversation_text_or_None, reason, flags)."""
+#|     recent_signatures = db.get_recent_signatures()
+#|     recent_openings = db.get_recent_openings()
+#|     category_map = load_category_map()
+#|
+#|     for attempt in range(1, 4):
+#|         if deadline is not None and time.monotonic() >= deadline:
+#|             return None, "deadline_reached", []
+#|
+#|         # 1. Pick this conversation's axes: bond stage, tone class, turns, user style, edge slice
+#|         axes = pick_axes(leaf, recent_tone_cats)
+#|
+#|         # 2. Pick tone category (avoids recent ones, respects the picked axes)
+#|         tone_cat = pick_tone_category(recent_tone_cats, allowed=axes["allowed_categories"])
+#|         cat_name = tone_cat["category"]
+#|
+#|         # 3. Map to conversation type
+#|         conv_type = category_map.get(cat_name, "playful-banter")
+#|
+#|         # 4. Build variety bundle
+#|         bundle = pick_variety_bundle(conv_type)
+#|
+#|         # 5. Pick ending category
+#|         ending_cat = pick_ending_category(
+#|             conv_type, bundle["env"].get("ending_lean", [])
+#|         )
+#|
+#|         # 6. Build prompt
+#|         prompt = build_prompt(leaf, tone_cat, bundle, ending_cat, axes)
+#|
+#|         # 7. Call Gemini
+#|         text = _call_with_key_rotation(key_rotator, prompt, deadline=deadline)
+#|         if text is None:
+#|             return None, "all_keys_exhausted", []
+#|
+#|         # 8. Validate + safe-fix (address forms, emoji, soft-quality flags)
+#|         conversation = parse_conversation(text)
+#|         result = validator.process(conversation)
+#|         if not result["ok"]:
+#|             logger.warning("Validation reject (attempt %d): %s", attempt, result["reason"])
+#|             if attempt == 3:
+#|                 return None, f"rejected_validation:{result['reason']}", []
+#|             continue
+#|         conversation = result["text"]
+#|         flags = result["flags"]
+#|
+#|         # 9. Dedup (on the fixed text, so parser edits don't create false dupes)
+#|         is_dup, dup_reason = dedup.is_duplicate(
+#|             conversation, db.hash_exists, recent_signatures, recent_openings
+#|         )
+#|         if is_dup:
+#|             logger.warning("Dedup reject (attempt %d): %s", attempt, dup_reason)
+#|             if attempt == 3:
+#|                 _track_tone(recent_tone_cats, cat_name)
+#|                 return conversation, "accepted_after_dedup_retries_exhausted", flags
+#|             continue
+#|
+#|         # 10. Success
+#|         _track_tone(recent_tone_cats, cat_name)
+#|         return conversation, "ok", flags
+#|
+#|     return None, "exhausted_retries", []
+#@@ END
+
+#@@ PY generate-yml-restore-6-slots
+#| text = read(".github/workflows/generate.yml")
+#| old = "        slot: [1, 2, 3]"
+#| new = "        slot: [1, 2, 3, 4, 5, 6]"
+#| if old in text:
+#|     write(".github/workflows/generate.yml", text.replace(old, new))
+#| else:
+#|     log("  matrix line not found / already 6, skipping")
+#@@ END

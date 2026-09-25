@@ -170,15 +170,6 @@ def generate_one(
                 return conversation, "accepted_after_dedup_retries_exhausted", flags
             continue
 
-        # 9b. Within-run repeated-phrase guard
-        overused, phrase = dedup.check_and_record_phrases(conversation)
-        if overused:
-            logger.warning("Dedup reject (attempt %d): repeated_phrase(%r)", attempt, phrase)
-            if attempt == 3:
-                _track_tone(recent_tone_cats, cat_name)
-                return conversation, "accepted_after_dedup_retries_exhausted", flags
-            continue
-
         # 10. Success
         _track_tone(recent_tone_cats, cat_name)
         return conversation, "ok", flags
