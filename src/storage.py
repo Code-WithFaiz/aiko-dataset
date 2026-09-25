@@ -1,8 +1,15 @@
 # src/storage.py
 """
-GitHub Releases storage: one release per DAY (tag `batch-YYYY-MM-DD`),
-each batch of conversations uploaded as a JSONL asset. A local copy
-under data/batches/ is always kept regardless of upload outcome.
+GitHub Releases storage.
+
+Normal conversations -> one release per day (tag `batch-YYYY-MM-DD`).
+Flagged conversations -> ONE fixed release forever (tag `flagged-conversations`).
+
+Records may be:
+  - dict  (ChatML record: {"messages": [...]})
+  - str   (raw conversation text; wrapped as {"conversation": ...} for back-compat)
+
+A local copy under data/batches/ is always kept regardless of upload outcome.
 """
 from __future__ import annotations
 
@@ -18,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 GITHUB_API = "https://api.github.com"
 LOCAL_BATCH_DIR = Path("data/batches")
+FLAGGED_RELEASE_TAG = "flagged-conversations"
 
 
 def _slot_suffix() -> str:
@@ -43,19 +51,30 @@ def _repo() -> str:
     return repo
 
 
-def write_local_batch(conversations: list[str], filename: str) -> Path:
+def _serialize(rec) -> str:
+    """Turn one item (dict or str) into a single JSONL line."""
+    if isinstance(rec, dict):
+        return json.dumps(rec, ensure_ascii=False)
+    return json.dumps({"conversation": rec}, ensure_ascii=False)
+
+
+def write_local_batch(records: list, filename: str) -> Path:
     LOCAL_BATCH_DIR.mkdir(parents=True, exist_ok=True)
     path = LOCAL_BATCH_DIR / filename
     with path.open("w", encoding="utf-8") as f:
-        for conv in conversations:
-            f.write(json.dumps({"conversation": conv}, ensure_ascii=False) + "\n")
+        for rec in records:
+            f.write(_serialize(rec) + "\n")
     return path
 
 
-def _get_or_create_daily_release(tag: str) -> dict | None:
+def _get_or_create_release(tag: str) -> dict | None:
     repo = _repo()
     try:
-        r = requests.get(f"{GITHUB_API}/repos/{repo}/releases/tags/{tag}", headers=_headers(), timeout=30)
+        r = requests.get(
+            f"{GITHUB_API}/repos/{repo}/releases/tags/{tag}",
+            headers=_headers(),
+            timeout=30,
+        )
         if r.status_code == 200:
             return r.json()
         if r.status_code == 404:
@@ -76,24 +95,25 @@ def _get_or_create_daily_release(tag: str) -> dict | None:
         return None
 
 
-def upload_batch(conversations: list[str], tag_prefix: str = "batch") -> tuple[bool, str]:
-    """Save locally, then upload as an asset to today's release.
+def upload_batch(records: list, tag_prefix: str = "batch") -> tuple[bool, str]:
+    """Save locally, then upload as one asset to the appropriate release.
 
-    tag_prefix picks which daily release this goes to: "batch" (default)
-    for normal accepted conversations, "flagged" for conversations that
-    passed the hard checks but were soft-flagged for quality review --
-    kept in their own release (flagged-YYYY-MM-DD) so they never mix
-    into the main dataset.
+    tag_prefix="batch"   -> tag = batch-YYYY-MM-DD   (per-day, normal data)
+    tag_prefix="flagged" -> tag = flagged-conversations (single, forever)
 
-    Returns (uploaded_ok, release_url_or_empty). Local file is kept
-    regardless of upload success.
+    Records may be dict (ChatML) or str (raw). Both are accepted.
+    Returns (uploaded_ok, release_url_or_empty). Local copy is always kept.
     """
     now = datetime.now(timezone.utc)
     filename = f"{tag_prefix}_{now.strftime('%Y%m%d_%H%M%S')}{_slot_suffix()}.jsonl"
-    local_path = write_local_batch(conversations, filename)
+    local_path = write_local_batch(records, filename)
 
-    tag = f"{tag_prefix}-{now.strftime('%Y-%m-%d')}"
-    release = _get_or_create_daily_release(tag)
+    if tag_prefix == "flagged":
+        tag = FLAGGED_RELEASE_TAG
+    else:
+        tag = f"{tag_prefix}-{now.strftime('%Y-%m-%d')}"
+
+    release = _get_or_create_release(tag)
     if release is None:
         logger.error("Could not get/create release %s; keeping local file only", tag)
         return False, ""
@@ -103,7 +123,13 @@ def upload_batch(conversations: list[str], tag_prefix: str = "batch") -> tuple[b
         with local_path.open("rb") as f:
             headers = _headers()
             headers["Content-Type"] = "application/jsonl"
-            r = requests.post(upload_url, headers=headers, params={"name": filename}, data=f.read(), timeout=60)
+            r = requests.post(
+                upload_url,
+                headers=headers,
+                params={"name": filename},
+                data=f.read(),
+                timeout=60,
+            )
         if r.status_code in (200, 201):
             asset = r.json()
             return True, asset.get("browser_download_url", release.get("html_url", ""))
@@ -114,16 +140,19 @@ def upload_batch(conversations: list[str], tag_prefix: str = "batch") -> tuple[b
         return False, ""
 
 
-def save_flagged(items: list[tuple[str, list[str]]]) -> Path:
-    """Local-only bucket for conversations that passed the hard checks but
-    were flagged for a soft quality issue. Never uploaded to GitHub
-    Releases -- kept only so you can spot-check them by hand."""
+def save_flagged(items: list[tuple]) -> Path:
+    """Local-only bucket for flagged conversations. Never uploaded to GitHub."""
     flagged_dir = Path("data/flagged")
     flagged_dir.mkdir(parents=True, exist_ok=True)
     now = datetime.now(timezone.utc)
     path = flagged_dir / f"flagged_{now.strftime('%Y%m%d_%H%M%S')}.jsonl"
     with path.open("w", encoding="utf-8") as f:
-        for conv, flags in items:
-            f.write(json.dumps({"conversation": conv, "flags": flags}, ensure_ascii=False) + "\n")
+        for rec, flags in items:
+            line = {"flags": flags}
+            if isinstance(rec, dict):
+                line["record"] = rec
+            else:
+                line["conversation"] = rec
+            f.write(json.dumps(line, ensure_ascii=False) + "\n")
     logger.info("Saved %d flagged conversations locally to %s", len(items), path)
     return path

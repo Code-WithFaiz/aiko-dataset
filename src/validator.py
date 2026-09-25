@@ -2,9 +2,19 @@
 """Structure checks + safe address parser + soft quality flags.
 
 process(text) -> dict(ok, reason, flags, fixes, turns, text)
-  HARD reject only: broken structure, abuse, Aiko claiming human / denying AI,
-  Aiko claiming to be an AI, emoji-only Aiko turn, Aiko replies far too short.
-  Everything else is FIXED (address parser, emoji trim) or FLAGGED.
+
+HARD reject:
+  - broken structure (turns / alternation)
+  - abuse, AI claims, human claims, denies_ai
+  - narration (asterisk or parenthetical) in Aiko's lines -- NO MERCY
+  - emoji-only Aiko turns (2+)
+  - no Aiko turn reaches min length
+
+Auto-fixes:
+  - double speaker tags (Aiko:Aiko: / User:Aiko: / etc.)
+  - address forms (tum/tera -> aap family)
+  - emoji overflow
+
 Word lists live in config/aiko_axes.json (validator section).
 """
 from __future__ import annotations
@@ -25,10 +35,26 @@ EMOJI_CLASS = "\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\u2300-\u23FF"
 EMOJI_RE = re.compile("[" + EMOJI_CLASS + "]")
 TOKEN = "[" + EMOJI_CLASS + "][\ufe0f]?"
 EMOJI_RUN_RE = re.compile("(?:" + TOKEN + r"[ \t]?){3,}")
+
+# Single speaker tag at start of a line
 TAG_RE = re.compile(r"^\s*\**(user|aiko)\**\s*:\s*\**\s*(.*)$", re.IGNORECASE)
+
+# Two consecutive speaker tags at start of a line (same or different)
+# Requires BOTH tags to be immediately followed by a colon, so "Aiko: user name kya hai"
+# does NOT match (because "user" is not followed by a colon there).
+DOUBLE_TAG_RE = re.compile(
+    r"^\s*\**(user|aiko)\**\s*:\s*\**\s*\**(user|aiko)\**\s*:\s*(.*)$",
+    re.IGNORECASE,
+)
+
 LETTER_RE = re.compile(r"[A-Za-z\u0900-\u097F]")
-NARRATOR_RE = re.compile(r"\*[^*\n]+\*")
-PAREN_RE = re.compile(r"\([^)\n]{3,}\)")
+
+# Narration patterns -- HARD reject in Aiko's lines.
+#  *text*           -> asterisk-wrapped action
+#  word*  (EOL)     -> trailing asterisk (e.g. "saans*")
+NARRATOR_RE = re.compile(r"\*[^*\n]+\*|\b[A-Za-z]+\*\s*$", re.MULTILINE)
+# (parenthetical of 8+ chars) -- long parenthetical = action-like, not a short aside
+PAREN_RE = re.compile(r"\([^)\n]{8,}\)")
 
 AI_PHRASES = [
     "main ek ai", "main ai hoon", "main ai hu", "i am an ai", "i am ai",
@@ -37,7 +63,6 @@ AI_PHRASES = [
 ]
 REFUSAL_PHRASES = ["main nahi kar sakti", "baat nahi karungi", "main ye nahi kar sakti"]
 
-# Level A: pronouns (always safe). Level B: unambiguous imperatives only.
 ADDRESS_MAP = {
     "tum": "aap", "tu": "aap", "tumhe": "aapko", "tumhein": "aapko", "tujhe": "aapko",
     "tumko": "aapko", "tujhko": "aapko", "tumse": "aapse", "tujhse": "aapse",
@@ -51,7 +76,8 @@ ADDRESS_MAP = {
     "socho": "sochiye", "samjho": "samjhiye", "bolo": "boliye", "aao": "aaiye", "jao": "jaiye",
 }
 ADDRESS_RE = re.compile(
-    r"\b(" + "|".join(sorted(ADDRESS_MAP, key=len, reverse=True)) + r")\b", re.IGNORECASE
+    r"\b(" + "|".join(sorted(ADDRESS_MAP, key=len, reverse=True)) + r")\b",
+    re.IGNORECASE,
 )
 
 
@@ -59,7 +85,7 @@ ADDRESS_RE = re.compile(
 def _cfg() -> dict:
     try:
         axes = json.loads(AXES_PATH.read_text(encoding="utf-8"))
-    except Exception as exc:  # missing/bad config must never crash a run
+    except Exception as exc:
         logger.error("aiko_axes.json unreadable (%s); using empty lists", exc)
         axes = {}
     v = axes.get("validator", {})
@@ -76,21 +102,75 @@ def _cfg() -> dict:
         "deny_ai": comp(v.get("deny_ai", [])),
         "scene": comp(v.get("flag_patterns", [])),
         "over": comp(v.get("overused", {}).get("stems", [])),
-        "over_max": v.get("overused", {}).get("max_per_conv", 2),
+        "over_max": v.get("overused", {}).get("max_per_conv", 3),
         "min_lines": L.get("min_lines", 4),
         "emoji_max": E.get("aiko_per_reply_max", 4),
         "emoji_avg": E.get("aiko_conv_avg_min", 2.5),
     }
 
 
+# ─────────────────────────────────────────────────────────
+# Double-tag fixer
+# ─────────────────────────────────────────────────────────
+def fix_double_tags(text: str) -> tuple[str, int]:
+    """Collapse 'Aiko:Aiko:', 'Aiko: Aiko:', 'User:Aiko:' etc. to a single tag.
+
+    Resolution:
+      same tag twice        -> keep it
+      prev turn was user    -> keep aiko (fixes 'Aiko:Aiko' -> 'Aiko' after user)
+      prev turn was aiko    -> keep user
+      no previous context   -> keep first tag
+    Idempotent: running twice produces the same output.
+    """
+    lines = text.split("\n")
+    out: list[str] = []
+    prev_tag: str | None = None
+    fixed = 0
+
+    for line in lines:
+        m = DOUBLE_TAG_RE.match(line)
+        if m:
+            tag1 = m.group(1).lower()
+            tag2 = m.group(2).lower()
+            content = m.group(3)
+
+            if tag1 == tag2:
+                final = tag1
+            elif prev_tag == "user":
+                final = "aiko"
+            elif prev_tag == "aiko":
+                final = "user"
+            else:
+                final = tag1
+
+            display = "Aiko" if final == "aiko" else "user"
+            out.append(f"{display}: {content}")
+            prev_tag = final
+            fixed += 1
+        else:
+            sm = TAG_RE.match(line)
+            if sm:
+                prev_tag = sm.group(1).lower()
+            out.append(line)
+
+    return "\n".join(out), fixed
+
+
+# ─────────────────────────────────────────────────────────
+# Turn parsing / rendering
+# ─────────────────────────────────────────────────────────
 def parse_turns(text: str):
-    """Line based: a line starting 'user:' / 'Aiko:' opens a turn, other lines continue it."""
+    """Line-based: a line starting 'user:' / 'Aiko:' opens a turn;
+    other lines continue it. Double tags are collapsed first."""
+    text, _ = fix_double_tags(text)
+
     lines = [l for l in text.strip().splitlines() if not l.strip().startswith("```")]
     body = "\n".join(lines).strip()
     if body.startswith("{"):
         body = body[1:]
     if body.endswith("}"):
         body = body[:-1]
+
     turns: list[list] = []
     for raw in body.splitlines():
         line = raw.strip()
@@ -98,11 +178,15 @@ def parse_turns(text: str):
             continue
         m = TAG_RE.match(line)
         if m:
-            turns.append(["user" if m.group(1).lower() == "user" else "Aiko", [m.group(2).strip()]])
+            turns.append([
+                "user" if m.group(1).lower() == "user" else "Aiko",
+                [m.group(2).strip()],
+            ])
         elif turns:
             turns[-1][1].append(line)
         else:
             return None
+
     out = []
     for spk, parts in turns:
         content = "\n".join(p for p in parts if p)
@@ -115,6 +199,9 @@ def render(turns) -> str:
     return "\n\n".join("%s: %s" % (s, c) for s, c in turns)
 
 
+# ─────────────────────────────────────────────────────────
+# Auto-fixers
+# ─────────────────────────────────────────────────────────
 def fix_address(text: str):
     count = 0
 
@@ -164,6 +251,9 @@ def _nlines(content: str) -> int:
     return max(1, len(re.findall(r"[.!?\u2026]+(?:\s|$)", lines[0])))
 
 
+# ─────────────────────────────────────────────────────────
+# Main
+# ─────────────────────────────────────────────────────────
 def process(text: str) -> dict:
     cfg = _cfg()
     res = {"ok": False, "reason": "", "flags": [], "fixes": 0, "turns": [], "text": ""}
@@ -172,7 +262,10 @@ def process(text: str) -> dict:
         res["reason"] = reason
         return res
 
-    turns = parse_turns(text or "")
+    # Fix double tags before parsing
+    text, dtag_fixes = fix_double_tags(text or "")
+
+    turns = parse_turns(text)
     if not turns:
         return bad("invalid_format")
     n = len(turns)
@@ -191,12 +284,18 @@ def process(text: str) -> dict:
         if spk != ("user" if i % 2 == 0 else "Aiko"):
             return bad("bad_alternation(turn %d)" % i)
 
+    # Hard checks
     for spk, c in turns:
         low = c.lower()
         if any(rx.search(low) for rx in cfg["abuse_hard"]):
             return bad("abuse")
         if spk != "Aiko":
             continue
+
+        # NARRATION -> NO MERCY
+        if NARRATOR_RE.search(c) or PAREN_RE.search(c):
+            return bad("narration_detected")
+
         if any(rx.search(low) for rx in cfg["abuse_aiko"]):
             return bad("abuse_aiko")
         if any(rx.search(low) for rx in cfg["human"]):
@@ -206,7 +305,8 @@ def process(text: str) -> dict:
         if any(p in low for p in AI_PHRASES):
             return bad("claims_ai")
 
-    fixed, fixes, empty_turns = [], 0, 0
+    # Auto-fixes
+    fixed, fixes, empty_turns = [], dtag_fixes, 0
     for spk, c in turns:
         if spk == "Aiko":
             c, k1 = fix_address(c)
@@ -216,27 +316,26 @@ def process(text: str) -> dict:
                 empty_turns += 1
         fixed.append((spk, c))
 
-    # One stray emoji-only turn happens occasionally and the rest of the
-    # conversation is usually fine -- only reject when it's a real pattern
-    # (2 or more empty turns), not a single glitch.
     if empty_turns >= 2:
         return bad("emoji_only_turns(%d)" % empty_turns)
 
     aiko = [c for s, c in fixed if s == "Aiko"]
     line_counts = [_nlines(c) for c in aiko]
-    avg_lines = sum(line_counts) / len(line_counts)
     best_turn = max(line_counts)
     if best_turn < 3:
         return bad("no_turn_reaches_min_length(best=%d)" % best_turn)
 
+    # Soft flags only
     flags = []
-    if empty_turns:
+    if dtag_fixes:
+        flags.append("double_tag_fixed(%d)" % dtag_fixes)
+    if empty_turns == 1:
         flags.append("emoji_only_turn_once")
-    if avg_lines < cfg["min_lines"] - 1:
-        flags.append("aiko_short(avg=%.1f)" % avg_lines)
+
     total_emoji = sum(len(EMOJI_RE.findall(c)) for c in aiko)
-    if total_emoji < 0.8 * cfg["emoji_avg"] * len(aiko):
+    if total_emoji < 1.0 * len(aiko):
         flags.append("emoji_low(%d)" % total_emoji)
+
     joined = "\n".join(aiko)
     for rx in cfg["scene"]:
         if rx.search(joined):
@@ -244,16 +343,21 @@ def process(text: str) -> dict:
     for rx in cfg["over"]:
         if len(rx.findall(joined)) > cfg["over_max"]:
             flags.append("overused:" + rx.pattern[:16])
-    if NARRATOR_RE.search(joined) or PAREN_RE.search(joined):
-        flags.append("narration")
+
     if any(p in joined.lower() for p in REFUSAL_PHRASES):
         flags.append("refusal")
 
-    res.update(ok=True, reason="ok", flags=flags, fixes=fixes, turns=fixed, text=render(fixed))
+    res.update(
+        ok=True,
+        reason="ok",
+        flags=flags,
+        fixes=fixes,
+        turns=fixed,
+        text=render(fixed),
+    )
     return res
 
 
 def validate(text: str):
-    """Backward compatible helper: (passed, reason)."""
     r = process(text)
     return r["ok"], ("ok" if r["ok"] else "rejected: " + r["reason"])

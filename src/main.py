@@ -3,10 +3,10 @@
 Orchestrator: one invocation = one GitHub Actions run.
 Graceful shutdown at 52 min (before GitHub's 55 min hard timeout).
 
-Aligned with new generator.py:
-  - Uses pick_tone_category / pick_variety_bundle / pick_ending_category
-  - No scenarios / openers / endings-inline
-  - Personality + variety configs loaded lazily by generator (cached)
+Flow (v2):
+  - generate_one() returns a ChatML record ready for upload (no plain text)
+  - dedup bookkeeping (hash/signature/opening) happens inside generate_one
+  - storage handles both dict records and legacy str conversations
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from src import db, dedup, notifier, storage, validator
+from src import converter, db, dedup, notifier, storage, validator
 from src.generator import (
     FALLBACK_MODEL,
     PRIMARY_MODEL,
@@ -50,6 +50,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 CONFIG_DIR = Path("config")
+
+
 def _env_int(name, default):
     val = os.getenv(name, "")
     try:
@@ -70,16 +72,13 @@ _shutdown_requested = False
 
 
 def _signal_handler(signum, frame):
-    """Set flag when GitHub sends SIGINT/SIGTERM (on cancel/timeout).
-    The main loop checks this flag and exits gracefully, so the run lock
-    gets released and no orphaned lock is left behind in MongoDB."""
     global _shutdown_requested
     _shutdown_requested = True
     logger.warning("Shutdown signal %s received; will stop after current iteration", signum)
 
 
 # ─────────────────────────────────────────────────────────
-# Config loading — topics only (other configs live in generator)
+# Config loading
 # ─────────────────────────────────────────────────────────
 def load_topics() -> dict:
     return json.loads((CONFIG_DIR / "topics.json").read_text(encoding="utf-8"))
@@ -112,8 +111,12 @@ def generate_one(
     leaf: dict,
     recent_tone_cats: list[str],
     deadline: float | None = None,
-) -> tuple[str | None, str, list[str]]:
-    """Returns (conversation_text_or_None, reason, flags)."""
+) -> tuple[dict | None, str, list[str]]:
+    """Returns (chatml_record_or_None, reason, flags).
+
+    On success, the returned dict is a ready-to-upload ChatML record.
+    Dedup bookkeeping (hash / signature / opening) is done right here.
+    """
     recent_signatures = db.get_recent_signatures()
     recent_openings = db.get_recent_openings()
     category_map = load_category_map()
@@ -122,33 +125,33 @@ def generate_one(
         if deadline is not None and time.monotonic() >= deadline:
             return None, "deadline_reached", []
 
-        # 1. Pick this conversation's axes: bond stage, tone class, turns, user style, edge slice
+        # 1. Axes
         axes = pick_axes(leaf, recent_tone_cats)
 
-        # 2. Pick tone category (avoids recent ones, respects the picked axes)
+        # 2. Tone category
         tone_cat = pick_tone_category(recent_tone_cats, allowed=axes["allowed_categories"])
         cat_name = tone_cat["category"]
 
-        # 3. Map to conversation type
+        # 3. Conversation type
         conv_type = category_map.get(cat_name, "playful-banter")
 
-        # 4. Build variety bundle
+        # 4. Variety bundle
         bundle = pick_variety_bundle(conv_type)
 
-        # 5. Pick ending category
+        # 5. Ending category
         ending_cat = pick_ending_category(
             conv_type, bundle["env"].get("ending_lean", [])
         )
 
-        # 6. Build prompt
+        # 6. Prompt
         prompt = build_prompt(leaf, tone_cat, bundle, ending_cat, axes)
 
-        # 7. Call Gemini
+        # 7. Gemini
         text = _call_with_key_rotation(key_rotator, prompt, deadline=deadline)
         if text is None:
             return None, "all_keys_exhausted", []
 
-        # 8. Validate + safe-fix (address forms, emoji, soft-quality flags)
+        # 8. Validate + safe-fix
         conversation = parse_conversation(text)
         result = validator.process(conversation)
         if not result["ok"]:
@@ -159,20 +162,29 @@ def generate_one(
         conversation = result["text"]
         flags = result["flags"]
 
-        # 9. Dedup (on the fixed text, so parser edits don't create false dupes)
+        # 9. Dedup
         is_dup, dup_reason = dedup.is_duplicate(
             conversation, db.hash_exists, recent_signatures, recent_openings
         )
         if is_dup:
             logger.warning("Dedup reject (attempt %d): %s", attempt, dup_reason)
             if attempt == 3:
+                # Accept as last resort — still record + convert.
+                record = converter.to_record(result["turns"])
+                db.add_hash(dedup.hash_text(conversation))
+                db.add_signature(dedup.signature(conversation))
+                db.add_opening(dedup.opening_text(conversation))
                 _track_tone(recent_tone_cats, cat_name)
-                return conversation, "accepted_after_dedup_retries_exhausted", flags
+                return record, "accepted_after_dedup_retries_exhausted", flags
             continue
 
-        # 10. Success
+        # 10. Success — convert to ChatML + record bookkeeping, both here.
+        record = converter.to_record(result["turns"])
+        db.add_hash(dedup.hash_text(conversation))
+        db.add_signature(dedup.signature(conversation))
+        db.add_opening(dedup.opening_text(conversation))
         _track_tone(recent_tone_cats, cat_name)
-        return conversation, "ok", flags
+        return record, "ok", flags
 
     return None, "exhausted_retries", []
 
@@ -245,7 +257,6 @@ def _call_with_key_rotation(
 
 
 def _key_id(key: str) -> str:
-    """Stable key ID for MongoDB tracking."""
     return f"key_{hashlib.sha256(key.encode()).hexdigest()[:12]}"
 
 
@@ -287,8 +298,8 @@ def _run_locked() -> int:
         logger.critical("DB unreachable or leaf setup failed: %s", exc)
         return 1
 
-    batch: list[str] = []
-    flagged_batch: list[tuple[str, list[str]]] = []
+    batch: list[dict] = []
+    flagged_batch: list[tuple[dict, list[str]]] = []
     generated = 0
     rejected = 0
     recent_tone_cats: list[str] = []
@@ -321,7 +332,7 @@ def _run_locked() -> int:
         leaf = leaf_by_path[leaf_path]
 
         try:
-            conversation, reason, flags = generate_one(
+            record, reason, flags = generate_one(
                 key_rotator, leaf, recent_tone_cats, deadline=deadline,
             )
         except Exception as exc:
@@ -329,7 +340,7 @@ def _run_locked() -> int:
             rejected += 1
             continue
 
-        if conversation is None:
+        if record is None:
             rejected += 1
             if reason == "all_keys_exhausted":
                 break
@@ -342,14 +353,11 @@ def _run_locked() -> int:
                 break
             continue
 
-        db.add_hash(dedup.hash_text(conversation))
-        db.add_signature(dedup.signature(conversation))
-        db.add_opening(dedup.opening_text(conversation))
-
+        # No more hashing here — done inside generate_one.
         if flags:
-            flagged_batch.append((conversation, flags))
+            flagged_batch.append((record, flags))
         else:
-            batch.append(conversation)
+            batch.append(record)
         db.increment_leaf_generated(leaf_path, 1)
         generated += 1
 
@@ -376,7 +384,7 @@ def _run_locked() -> int:
     return 0
 
 
-def _flush_batch(batch: list[str]) -> None:
+def _flush_batch(batch: list[dict]) -> None:
     ok, url = storage.upload_batch(batch)
     batch_id = f"batch_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
     if ok:

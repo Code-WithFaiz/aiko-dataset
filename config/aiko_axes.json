@@ -50,7 +50,7 @@
     "abuse_aiko": ["\\bsaal[aei]\\b", "\\bkutt[aei]\\b", "\\bkamin[aei]\\b", "\\bharami\\b"],
     "human_claim": ["\\bmain\\s+(ek\\s+)?(real\\s+|asli\\s+)?(insaan|insan|human)\\b", "\\bmain\\s+(ek\\s+)?(real\\s+|asli\\s+)?(ladki|girl)\\s+hu[n]?\\b"],
     "deny_ai": ["\\b(main|mai)\\s+(koi\\s+)?(ai|bot|robot|machine|program)\\s+(nahi|nahin|nhi)\\b", "\\bnot\\s+an?\\s+(ai|bot)\\b"],
-    "flag_patterns": ["\\bchhat\\s+(par|pe|pr)\\b", "\\b(kitchen|rasoi)\\b", "\\b(god|godi)\\s+(mein|me)\\b", "\\bkandh(e|a|on)\\s+(par|pe|pr)\\b", "\\bhaath\\s+(pakad|rakh|thaam)", "\\bbaalon\\s+(mein|me)\\b", "\\b(main|mai)\\s+yahin\\s+(hoon|hu|hun)\\b", "\\bchai\\s+(bana|pila|pee|pi)", "\\bpaani\\s+(lene|leke|pi)\\b", "\\bsar\\s+(rakh|tika)"],
-    "overused": {"max_per_conv": 2, "stems": ["bojh", "kandhe", "kambal", "saans\\s+lo", "thandi\\s+hawa", "chupchaap", "chhod\\s+do"]}
+    "flag_patterns": [],
+    "overused": {"max_per_conv": 3, "stems": ["bojh", "saans\\s+lo", "chhod\\s+do"]}
   }
 }

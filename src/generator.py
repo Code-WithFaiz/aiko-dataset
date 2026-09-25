@@ -1,9 +1,8 @@
 # src/generator.py
 """
 Core generation logic: axes-driven prompt (bond stage, tone class, user
-style, edge slices) + the existing variety texture pickers (mood/arc/
-environment/pattern/vibes/shape), built into one prompt with no example
-lines and no contradictory guardrails.
+style, edge slices) + variety texture pickers (mood/arc/environment/
+pattern/vibes/shape), built into one prompt.
 """
 from __future__ import annotations
 
@@ -36,7 +35,8 @@ def _env_float(name: str, default: float) -> float:
 TEMPERATURE = _env_float("TEMPERATURE", 0.9)
 TOP_P = 0.95
 TOP_K = 40
-MAX_OUTPUT_TOKENS = 1800
+# Bumped from 1800 to 3000: reduces "too_few_turns" truncation.
+MAX_OUTPUT_TOKENS = 3000
 
 PLAYFUL_TYPES = {"playful-banter", "teasing-nakhra", "silly-random", "flirty-light"}
 
@@ -117,7 +117,7 @@ def flatten_topics(tree: dict) -> list[dict]:
 
 
 # ─────────────────────────────────────────────────────────
-# Axes picking (bond stage, tone class, turns, user style, edge slice)
+# Axes picking
 # ─────────────────────────────────────────────────────────
 def _weighted_choice(items: list, weights: list):
     return random.choices(items, weights=weights, k=1)[0]
@@ -220,7 +220,7 @@ def pick_tone_category(recent: Optional[list[str]] = None, allowed: Optional[set
 
 
 # ─────────────────────────────────────────────────────────
-# Conflict-filter helpers (unchanged texture pickers)
+# Conflict-filter helpers
 # ─────────────────────────────────────────────────────────
 def _mood_allowed(mood_key: str, conv_type: str, variety: dict) -> bool:
     for rule in variety["conflict_rules"]["type_vs_mood"]:
@@ -364,7 +364,7 @@ def pick_variety_bundle(conv_type: str) -> dict:
 
 
 # ─────────────────────────────────────────────────────────
-# Ending picking (unchanged)
+# Ending picking
 # ─────────────────────────────────────────────────────────
 def pick_ending_category(conv_type: str, env_lean: list[str]) -> dict:
     endings = load_endings()
@@ -563,7 +563,7 @@ def call_gemini(prompt: str, api_key: str, model: str = PRIMARY_MODEL) -> str:
     try:
         response = _call(True)
     except TypeError:
-        # This SDK/endpoint doesn't accept generation_config -- fall back silently.
+        # SDK doesn't accept generation_config -- fall back silently.
         response = _call(False)
     except Exception as exc:
         status = getattr(exc, "code", None) or getattr(exc, "status_code", None)
