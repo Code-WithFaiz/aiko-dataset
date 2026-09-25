@@ -33,7 +33,7 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
-TEMPERATURE = _env_float("TEMPERATURE", 1.1)
+TEMPERATURE = _env_float("TEMPERATURE", 0.9)
 TOP_P = 0.95
 TOP_K = 40
 MAX_OUTPUT_TOKENS = 1800
@@ -508,6 +508,7 @@ def build_prompt(leaf: dict, tone_cat: dict, bundle: dict, ending_cat: dict, axe
         _topic_section(leaf),
         _edge_section(axes),
         _ending_section(ending_cat),
+        _length_example_section(axes["lengths"]["aiko"]["ideal_lines"]),
         _output_format_section(axes["turns"], axes["lengths"]["aiko"]["ideal_lines"]),
     ]
     return "\n\n".join(s for s in sections if s)
@@ -614,3 +615,23 @@ def parse_conversation(text: str) -> str:
             return "\n\n".join(parts)
 
     return cleaned
+
+
+def _length_example_section(ideal_lines: int) -> str:
+    filler = [
+        "Achha ye sunke maza aa gaya!",
+        "Mujhe pata hi nahi tha ye cheez, seriously.",
+        "Tumne kaise socha isko itni detail mein?",
+        "Aur batao, iske baad kya socha tha?",
+        "Sach mein, itna sun ke curious ho gayi hu main ab.",
+    ][:max(3, ideal_lines)]
+    example = "Aiko: " + filler[0] + "\n" + "\n".join(filler[1:])
+    return (
+        "## LENGTH -- LOOK AT THIS SHAPE ONLY\n"
+        "This is ONLY to show how long and how multi-line a real Aiko turn looks. "
+        "NEVER reuse these exact words -- invent completely different words that fit the "
+        "actual topic and mood of this conversation:\n"
+        f"{example}\n"
+        "Every one of Aiko's turns in your answer must be this long -- several real lines, "
+        "never one short sentence."
+    )

@@ -177,9 +177,6 @@ def process(text: str) -> dict:
         return bad("invalid_format")
     n = len(turns)
 
-    # A trailing incomplete turn (model added one more "user:" with no Aiko
-    # reply after it) is common and recoverable -- trim it instead of
-    # throwing the whole conversation away.
     if n % 2 and turns[-1][0] == "user":
         turns = turns[:-1]
         n -= 1
@@ -219,13 +216,19 @@ def process(text: str) -> dict:
                 return bad("emoji_only_turn")
         fixed.append((spk, c))
 
+    # Lenient by design: only reject if NOT EVEN ONE Aiko turn in the whole
+    # conversation reaches a real length. A couple of short turns mixed in
+    # with longer ones is fine and normal texting -- only an entirely flat,
+    # one-line-everywhere conversation gets rejected.
     aiko = [c for s, c in fixed if s == "Aiko"]
-    avg_lines = sum(_nlines(c) for c in aiko) / len(aiko)
-    if avg_lines < 2.5:
-        return bad("aiko_too_short(avg=%.1f)" % avg_lines)
+    line_counts = [_nlines(c) for c in aiko]
+    avg_lines = sum(line_counts) / len(line_counts)
+    best_turn = max(line_counts)
+    if best_turn < 3:
+        return bad("no_turn_reaches_min_length(best=%d)" % best_turn)
 
     flags = []
-    if avg_lines < cfg["min_lines"] - 0.5:
+    if avg_lines < cfg["min_lines"] - 1:
         flags.append("aiko_short(avg=%.1f)" % avg_lines)
     total_emoji = sum(len(EMOJI_RE.findall(c)) for c in aiko)
     if total_emoji < 0.8 * cfg["emoji_avg"] * len(aiko):
