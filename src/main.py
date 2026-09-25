@@ -362,17 +362,17 @@ def _run_locked() -> int:
         generated += 1
 
         if len(batch) >= BATCH_UPLOAD_THRESHOLD:
-            _flush_batch(batch)
+            _flush_batch(batch, tag_prefix="batch")
             batch = []
         if len(flagged_batch) >= BATCH_UPLOAD_THRESHOLD:
-            storage.upload_batch([c for c, _ in flagged_batch], tag_prefix="flagged")
+            _flush_batch([c for c, _ in flagged_batch], tag_prefix="flagged")
             flagged_batch = []
 
     if batch:
-        _flush_batch(batch)
+        _flush_batch(batch, tag_prefix="batch")
     if flagged_batch:
-        storage.upload_batch([c for c, _ in flagged_batch], tag_prefix="flagged")
-
+        _flush_batch([c for c, _ in flagged_batch], tag_prefix="flagged")
+			
     db.record_generated(generated, rejected)
     logger.info(
         "Run complete: generated=%d rejected=%d%s",
@@ -384,22 +384,23 @@ def _run_locked() -> int:
     return 0
 
 
-def _flush_batch(batch: list[dict]) -> None:
-    ok, url = storage.upload_batch(batch)
+def _flush_batch(batch: list[dict], tag_prefix: str = "batch") -> None:
+    """Upload one batch and log it. tag_prefix='batch' for clean, 'flagged' for review."""
+    ok, url = storage.upload_batch(batch, tag_prefix=tag_prefix)
     slot = os.getenv("SLOT_ID", "0")
-    batch_id = f"batch_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_s{slot}"
+    batch_id = f"{tag_prefix}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_s{slot}"
     if ok:
-        db.log_batch(batch_id, url, len(batch))
-        logger.info("Uploaded batch of %d conversations to %s", len(batch), url)
+        db.log_batch(batch_id, url, len(batch), tag_prefix=tag_prefix)
+        logger.info("Uploaded %s batch of %d conversations to %s", tag_prefix, len(batch), url)
     else:
-        logger.error("Batch upload failed; %d conversations kept locally only", len(batch))
+        logger.error("%s batch upload failed; %d conversations kept locally only", tag_prefix, len(batch))
 
 
-def _maybe_send_daily_report() -> None:
-    try:
-        notifier.send_daily_report()
-    except Exception as exc:
-        logger.error("Failed to send daily report: %s", exc)
+def _maybe_send_daily_report() -> None:          # ← YEH ADD KARO
+    try:                                         # ← YEH ADD KARO
+        notifier.send_daily_report()             # ← YEH ADD KARO
+    except Exception as exc:                     # ← YEH ADD KARO
+        logger.error("Failed to send daily report: %s", exc)   # ← YEH ADD KARO
 
 
 if __name__ == "__main__":

@@ -340,10 +340,18 @@ def increment_key_requests(key_id: str) -> None:
 
 # ---------- Batch log ----------
 
-def log_batch(batch_id: str, release_url: str, count: int) -> None:
+def log_batch(batch_id: str, release_url: str, count: int, tag_prefix: str = "batch") -> None:
+    """Log a completed upload. tag_prefix distinguishes clean vs flagged batches
+    so the notifier can report them separately."""
     db = get_db()
     db.batch_log.insert_one(
-        {"batch_id": batch_id, "release_url": release_url, "count": count, "created_at": datetime.now(timezone.utc)}
+        {
+            "batch_id": batch_id,
+            "release_url": release_url,
+            "count": count,
+            "tag_prefix": tag_prefix,
+            "created_at": datetime.now(timezone.utc),
+        }
     )
 
 
