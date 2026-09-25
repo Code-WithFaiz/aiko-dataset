@@ -76,18 +76,23 @@ def _get_or_create_daily_release(tag: str) -> dict | None:
         return None
 
 
-def upload_batch(conversations: list[str]) -> tuple[bool, str]:
+def upload_batch(conversations: list[str], tag_prefix: str = "batch") -> tuple[bool, str]:
     """Save locally, then upload as an asset to today's release.
 
+    tag_prefix picks which daily release this goes to: "batch" (default)
+    for normal accepted conversations, "flagged" for conversations that
+    passed the hard checks but were soft-flagged for quality review --
+    kept in their own release (flagged-YYYY-MM-DD) so they never mix
+    into the main dataset.
+
     Returns (uploaded_ok, release_url_or_empty). Local file is kept
-    regardless of upload success (Section 11: upload fails -> keep
-    local file, log, continue).
+    regardless of upload success.
     """
     now = datetime.now(timezone.utc)
-    filename = f"batch_{now.strftime('%Y%m%d_%H%M%S')}{_slot_suffix()}.jsonl"
+    filename = f"{tag_prefix}_{now.strftime('%Y%m%d_%H%M%S')}{_slot_suffix()}.jsonl"
     local_path = write_local_batch(conversations, filename)
 
-    tag = f"batch-{now.strftime('%Y-%m-%d')}"
+    tag = f"{tag_prefix}-{now.strftime('%Y-%m-%d')}"
     release = _get_or_create_daily_release(tag)
     if release is None:
         logger.error("Could not get/create release %s; keeping local file only", tag)

@@ -2571,3 +2571,268 @@ if __name__ == "__main__":
 #|     res.update(ok=True, reason="ok", flags=flags, fixes=fixes, turns=fixed, text=render(fixed))
 #|     return res
 #@@ END
+# ============================= PART 9 =============================
+
+#@@ FUNC src/main.py _run_locked
+#| def _run_locked() -> int:
+#|     signal.signal(signal.SIGINT, _signal_handler)
+#|     signal.signal(signal.SIGTERM, _signal_handler)
+#|
+#|     try:
+#|         topics_tree = load_topics()
+#|     except (OSError, json.JSONDecodeError) as exc:
+#|         logger.critical("Failed to load topics.json: %s", exc)
+#|         return 1
+#|
+#|     try:
+#|         key_rotator = KeyRotator()
+#|     except RuntimeError as exc:
+#|         logger.critical("Key rotator init failed: %s", exc)
+#|         return 1
+#|
+#|     try:
+#|         leaf_by_path, order = get_or_build_leaf_order(topics_tree)
+#|     except Exception as exc:
+#|         logger.critical("DB unreachable or leaf setup failed: %s", exc)
+#|         return 1
+#|
+#|     batch: list[str] = []
+#|     flagged_batch: list[tuple[str, list[str]]] = []
+#|     generated = 0
+#|     rejected = 0
+#|     recent_tone_cats: list[str] = []
+#|     run_start = time.monotonic()
+#|     deadline = run_start + RUN_DEADLINE_SECONDS
+#|     graceful_shutdown = False
+#|
+#|     for i in range(LOOP_ITERATIONS):
+#|         if _shutdown_requested:
+#|             logger.info(
+#|                 "Graceful shutdown requested via signal. Flushing %d batched conversations.",
+#|                 len(batch),
+#|             )
+#|             graceful_shutdown = True
+#|             break
+#|
+#|         elapsed = time.monotonic() - run_start
+#|         if elapsed >= RUN_DEADLINE_SECONDS:
+#|             logger.info(
+#|                 "Graceful shutdown at %.1fs (deadline=%ds). Flushing %d batched conversations.",
+#|                 elapsed, RUN_DEADLINE_SECONDS, len(batch),
+#|             )
+#|             graceful_shutdown = True
+#|             break
+#|
+#|         leaf_path = db.get_next_leaf_path(order)
+#|         if leaf_path is None:
+#|             logger.info("All leaf quotas filled — dataset complete!")
+#|             break
+#|         leaf = leaf_by_path[leaf_path]
+#|
+#|         try:
+#|             conversation, reason, flags = generate_one(
+#|                 key_rotator, leaf, recent_tone_cats, deadline=deadline,
+#|             )
+#|         except Exception as exc:
+#|             logger.error("Unexpected error generating conversation %d: %s", i, exc)
+#|             rejected += 1
+#|             continue
+#|
+#|         if conversation is None:
+#|             rejected += 1
+#|             if reason == "all_keys_exhausted":
+#|                 break
+#|             if reason == "deadline_reached":
+#|                 logger.info(
+#|                     "Graceful shutdown inside generate_one (deadline). Flushing %d batched conversations.",
+#|                     len(batch),
+#|                 )
+#|                 graceful_shutdown = True
+#|                 break
+#|             continue
+#|
+#|         db.add_hash(dedup.hash_text(conversation))
+#|         db.add_signature(dedup.signature(conversation))
+#|         db.add_opening(dedup.opening_text(conversation))
+#|
+#|         if flags:
+#|             flagged_batch.append((conversation, flags))
+#|         else:
+#|             batch.append(conversation)
+#|         db.increment_leaf_generated(leaf_path, 1)
+#|         generated += 1
+#|
+#|         if len(batch) >= BATCH_UPLOAD_THRESHOLD:
+#|             _flush_batch(batch)
+#|             batch = []
+#|         if len(flagged_batch) >= BATCH_UPLOAD_THRESHOLD:
+#|             storage.upload_batch([c for c, _ in flagged_batch])
+#|             flagged_batch = []
+#|
+#|     if batch:
+#|         _flush_batch(batch)
+#|     if flagged_batch:
+#|         storage.upload_batch([c for c, _ in flagged_batch])
+#|
+#|     db.record_generated(generated, rejected)
+#|     logger.info(
+#|         "Run complete: generated=%d rejected=%d%s",
+#|         generated, rejected,
+#|         " [graceful_shutdown]" if graceful_shutdown else "",
+#|     )
+#|
+#|     _maybe_send_daily_report()
+#|     return 0
+#@@ END
+# ============================= PART 10 =============================
+
+#@@ FUNC src/storage.py upload_batch
+#| def upload_batch(conversations: list[str], tag_prefix: str = "batch") -> tuple[bool, str]:
+#|     """Save locally, then upload as an asset to today's release.
+#|
+#|     tag_prefix picks which daily release this goes to: "batch" (default)
+#|     for normal accepted conversations, "flagged" for conversations that
+#|     passed the hard checks but were soft-flagged for quality review --
+#|     kept in their own release (flagged-YYYY-MM-DD) so they never mix
+#|     into the main dataset.
+#|
+#|     Returns (uploaded_ok, release_url_or_empty). Local file is kept
+#|     regardless of upload success.
+#|     """
+#|     now = datetime.now(timezone.utc)
+#|     filename = f"{tag_prefix}_{now.strftime('%Y%m%d_%H%M%S')}{_slot_suffix()}.jsonl"
+#|     local_path = write_local_batch(conversations, filename)
+#|
+#|     tag = f"{tag_prefix}-{now.strftime('%Y-%m-%d')}"
+#|     release = _get_or_create_daily_release(tag)
+#|     if release is None:
+#|         logger.error("Could not get/create release %s; keeping local file only", tag)
+#|         return False, ""
+#|
+#|     upload_url = release["upload_url"].split("{")[0]
+#|     try:
+#|         with local_path.open("rb") as f:
+#|             headers = _headers()
+#|             headers["Content-Type"] = "application/jsonl"
+#|             r = requests.post(upload_url, headers=headers, params={"name": filename}, data=f.read(), timeout=60)
+#|         if r.status_code in (200, 201):
+#|             asset = r.json()
+#|             return True, asset.get("browser_download_url", release.get("html_url", ""))
+#|         logger.error("Asset upload failed: %s %s", r.status_code, r.text)
+#|         return False, ""
+#|     except (requests.RequestException, OSError) as exc:
+#|         logger.error("Exception uploading batch asset: %s", exc)
+#|         return False, ""
+#@@ END
+
+#@@ FUNC src/main.py _run_locked
+#| def _run_locked() -> int:
+#|     signal.signal(signal.SIGINT, _signal_handler)
+#|     signal.signal(signal.SIGTERM, _signal_handler)
+#|
+#|     try:
+#|         topics_tree = load_topics()
+#|     except (OSError, json.JSONDecodeError) as exc:
+#|         logger.critical("Failed to load topics.json: %s", exc)
+#|         return 1
+#|
+#|     try:
+#|         key_rotator = KeyRotator()
+#|     except RuntimeError as exc:
+#|         logger.critical("Key rotator init failed: %s", exc)
+#|         return 1
+#|
+#|     try:
+#|         leaf_by_path, order = get_or_build_leaf_order(topics_tree)
+#|     except Exception as exc:
+#|         logger.critical("DB unreachable or leaf setup failed: %s", exc)
+#|         return 1
+#|
+#|     batch: list[str] = []
+#|     flagged_batch: list[tuple[str, list[str]]] = []
+#|     generated = 0
+#|     rejected = 0
+#|     recent_tone_cats: list[str] = []
+#|     run_start = time.monotonic()
+#|     deadline = run_start + RUN_DEADLINE_SECONDS
+#|     graceful_shutdown = False
+#|
+#|     for i in range(LOOP_ITERATIONS):
+#|         if _shutdown_requested:
+#|             logger.info(
+#|                 "Graceful shutdown requested via signal. Flushing %d batched conversations.",
+#|                 len(batch),
+#|             )
+#|             graceful_shutdown = True
+#|             break
+#|
+#|         elapsed = time.monotonic() - run_start
+#|         if elapsed >= RUN_DEADLINE_SECONDS:
+#|             logger.info(
+#|                 "Graceful shutdown at %.1fs (deadline=%ds). Flushing %d batched conversations.",
+#|                 elapsed, RUN_DEADLINE_SECONDS, len(batch),
+#|             )
+#|             graceful_shutdown = True
+#|             break
+#|
+#|         leaf_path = db.get_next_leaf_path(order)
+#|         if leaf_path is None:
+#|             logger.info("All leaf quotas filled — dataset complete!")
+#|             break
+#|         leaf = leaf_by_path[leaf_path]
+#|
+#|         try:
+#|             conversation, reason, flags = generate_one(
+#|                 key_rotator, leaf, recent_tone_cats, deadline=deadline,
+#|             )
+#|         except Exception as exc:
+#|             logger.error("Unexpected error generating conversation %d: %s", i, exc)
+#|             rejected += 1
+#|             continue
+#|
+#|         if conversation is None:
+#|             rejected += 1
+#|             if reason == "all_keys_exhausted":
+#|                 break
+#|             if reason == "deadline_reached":
+#|                 logger.info(
+#|                     "Graceful shutdown inside generate_one (deadline). Flushing %d batched conversations.",
+#|                     len(batch),
+#|                 )
+#|                 graceful_shutdown = True
+#|                 break
+#|             continue
+#|
+#|         db.add_hash(dedup.hash_text(conversation))
+#|         db.add_signature(dedup.signature(conversation))
+#|         db.add_opening(dedup.opening_text(conversation))
+#|
+#|         if flags:
+#|             flagged_batch.append((conversation, flags))
+#|         else:
+#|             batch.append(conversation)
+#|         db.increment_leaf_generated(leaf_path, 1)
+#|         generated += 1
+#|
+#|         if len(batch) >= BATCH_UPLOAD_THRESHOLD:
+#|             _flush_batch(batch)
+#|             batch = []
+#|         if len(flagged_batch) >= BATCH_UPLOAD_THRESHOLD:
+#|             storage.upload_batch([c for c, _ in flagged_batch], tag_prefix="flagged")
+#|             flagged_batch = []
+#|
+#|     if batch:
+#|         _flush_batch(batch)
+#|     if flagged_batch:
+#|         storage.upload_batch([c for c, _ in flagged_batch], tag_prefix="flagged")
+#|
+#|     db.record_generated(generated, rejected)
+#|     logger.info(
+#|         "Run complete: generated=%d rejected=%d%s",
+#|         generated, rejected,
+#|         " [graceful_shutdown]" if graceful_shutdown else "",
+#|     )
+#|
+#|     _maybe_send_daily_report()
+#|     return 0
+#@@ END

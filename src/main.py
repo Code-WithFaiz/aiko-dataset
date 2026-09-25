@@ -357,13 +357,13 @@ def _run_locked() -> int:
             _flush_batch(batch)
             batch = []
         if len(flagged_batch) >= BATCH_UPLOAD_THRESHOLD:
-            storage.save_flagged(flagged_batch)
+            storage.upload_batch([c for c, _ in flagged_batch], tag_prefix="flagged")
             flagged_batch = []
 
     if batch:
         _flush_batch(batch)
     if flagged_batch:
-        storage.save_flagged(flagged_batch)
+        storage.upload_batch([c for c, _ in flagged_batch], tag_prefix="flagged")
 
     db.record_generated(generated, rejected)
     logger.info(
