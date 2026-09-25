@@ -35,8 +35,8 @@ def _env_float(name: str, default: float) -> float:
 TEMPERATURE = _env_float("TEMPERATURE", 0.9)
 TOP_P = 0.95
 TOP_K = 40
-# Bumped from 1800 to 3000: reduces "too_few_turns" truncation.
-MAX_OUTPUT_TOKENS = 3000
+# Bumped from 1800 to 4000: reduces "too_few_turns" truncation.
+MAX_OUTPUT_TOKENS = 4000
 
 PLAYFUL_TYPES = {"playful-banter", "teasing-nakhra", "silly-random", "flirty-light"}
 

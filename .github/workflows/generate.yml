@@ -6,7 +6,7 @@ on:
 jobs:
   generate:
     runs-on: ubuntu-latest
-    timeout-minutes: 55
+    timeout-minutes: 63
     strategy:
       fail-fast: false
       matrix:

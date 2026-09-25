@@ -1,7 +1,7 @@
 # src/main.py
 """
 Orchestrator: one invocation = one GitHub Actions run.
-Graceful shutdown at 52 min (before GitHub's 55 min hard timeout).
+Graceful shutdown at 58 min (before GitHub's 63 min hard timeout).
 
 Flow (v2):
   - generate_one() returns a ChatML record ready for upload (no plain text)
@@ -63,7 +63,7 @@ def _env_int(name, default):
 LOOP_ITERATIONS = _env_int("BATCH_SIZE", 100)
 BATCH_UPLOAD_THRESHOLD = 15
 DAILY_TARGET = _env_int("DAILY_TARGET", 6700)
-RUN_DEADLINE_SECONDS = 52 * 60
+RUN_DEADLINE_SECONDS = 58 * 60
 TONE_HISTORY_SIZE = 25
 RATE_LIMIT_COOLDOWN_SECONDS = 90
 
@@ -386,7 +386,8 @@ def _run_locked() -> int:
 
 def _flush_batch(batch: list[dict]) -> None:
     ok, url = storage.upload_batch(batch)
-    batch_id = f"batch_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+    slot = os.getenv("SLOT_ID", "0")
+    batch_id = f"batch_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_s{slot}"
     if ok:
         db.log_batch(batch_id, url, len(batch))
         logger.info("Uploaded batch of %d conversations to %s", len(batch), url)
