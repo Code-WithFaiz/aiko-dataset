@@ -1,12 +1,9 @@
 # src/generator.py
 """
-Core generation logic — slim prompt, strong rules, deterministic variant pick.
-
-Design:
-  - Prompt ~1200 tokens (was ~3500)
-  - Variant picked at BUILD time (not by LLM) → smaller prompt, no choice overload
-  - Hard rules FIRST, explicit forbidden words
-  - Ending avoid-list to kill monotony
+Core generation logic: axes-driven prompt (bond stage, tone class, user
+style, edge slices) + the existing variety texture pickers (mood/arc/
+environment/pattern/vibes/shape), built into one prompt with no example
+lines and no contradictory guardrails.
 """
 from __future__ import annotations
 
@@ -26,7 +23,17 @@ CONFIG_DIR = Path("config")
 
 PRIMARY_MODEL = "gemini-3.5-flash-lite"
 FALLBACK_MODEL = "gemini-3.5-flash"
-TEMPERATURE = float(os.getenv("TEMPERATURE", "1.1"))
+
+
+def _env_float(name: str, default: float) -> float:
+    val = os.getenv(name, "")
+    try:
+        return float(val) if val.strip() else default
+    except ValueError:
+        return default
+
+
+TEMPERATURE = _env_float("TEMPERATURE", 1.1)
 TOP_P = 0.95
 TOP_K = 40
 MAX_OUTPUT_TOKENS = 1800
@@ -76,6 +83,11 @@ def load_personality() -> str:
     return (CONFIG_DIR / "personality.md").read_text(encoding="utf-8")
 
 
+@lru_cache(maxsize=None)
+def load_axes() -> dict:
+    return json.loads((CONFIG_DIR / "aiko_axes.json").read_text(encoding="utf-8"))
+
+
 # ─────────────────────────────────────────────────────────
 # Topic flattening
 # ─────────────────────────────────────────────────────────
@@ -105,11 +117,101 @@ def flatten_topics(tree: dict) -> list[dict]:
 
 
 # ─────────────────────────────────────────────────────────
+# Axes picking (bond stage, tone class, turns, user style, edge slice)
+# ─────────────────────────────────────────────────────────
+def _weighted_choice(items: list, weights: list):
+    return random.choices(items, weights=weights, k=1)[0]
+
+
+def _pick_stage(axes: dict) -> dict:
+    stages = axes["stages"]
+    return _weighted_choice(stages, [s["weight"] for s in stages])
+
+
+def _pick_tone_class(axes: dict) -> str:
+    w = axes["tone_class_weights"]
+    classes = list(w.keys())
+    return _weighted_choice(classes, [w[c] for c in classes])
+
+
+def _pick_turns(axes: dict) -> int:
+    t = axes["turns"]
+    return _weighted_choice(t["choices"], t["weights"])
+
+
+def _pick_user_style(axes: dict) -> dict:
+    return _weighted_choice(axes["user_styles"], [s["weight"] for s in axes["user_styles"]])
+
+
+def _pick_edge(axes: dict, stage_id: int) -> Optional[dict]:
+    for edge in axes["edge_slices"]:
+        if stage_id >= edge.get("min_stage", 0) and random.random() < edge["rate_pct"] / 100.0:
+            return edge
+    return None
+
+
+def _topic_bias(leaf: dict, axes: dict) -> Optional[str]:
+    text = (leaf["core_topic"] + " " + leaf["core_definition"]).lower()
+    if any(k in text for k in axes["heavy_topic_keywords"]):
+        return "heavy"
+    if any(k in text for k in axes["fun_topic_keywords"]):
+        return "fun"
+    return None
+
+
+def _allowed_categories(tone_class: str, stage_id: int, axes: dict, category_map: dict) -> set[str]:
+    type_class = axes["type_class"]
+    min_stage = axes["min_stage_by_type"]
+    allowed = set()
+    for cat_name, conv_type in category_map.items():
+        cls = type_class.get(conv_type)
+        if cls and cls != tone_class:
+            continue
+        if stage_id < min_stage.get(conv_type, 0):
+            continue
+        allowed.add(cat_name)
+    return allowed
+
+
+def pick_axes(leaf: dict, recent_tone_cats: Optional[list[str]] = None) -> dict:
+    axes = load_axes()
+    category_map = load_category_map()
+
+    stage = _pick_stage(axes)
+    tone_class = _pick_tone_class(axes)
+
+    bias = _topic_bias(leaf, axes)
+    if bias == "heavy" and tone_class == "fun":
+        tone_class = "soft"
+    if bias == "fun" and tone_class == "heavy":
+        tone_class = "soft"
+
+    allowed = _allowed_categories(tone_class, stage["id"], axes, category_map)
+    if not allowed:
+        allowed = set(category_map.keys())
+
+    return {
+        "stage": stage,
+        "tone_class": tone_class,
+        "turns": _pick_turns(axes),
+        "user_style": _pick_user_style(axes),
+        "edge": _pick_edge(axes, stage["id"]),
+        "allowed_categories": allowed,
+        "lengths": axes["lengths"],
+        "emoji": axes["emoji"],
+    }
+
+
+# ─────────────────────────────────────────────────────────
 # Tone category picking
 # ─────────────────────────────────────────────────────────
-def pick_tone_category(recent: Optional[list[str]] = None) -> dict:
+def pick_tone_category(recent: Optional[list[str]] = None, allowed: Optional[set[str]] = None) -> dict:
     tone_menu = load_tone_menu()
     cats = tone_menu["categories"]
+    if allowed:
+        narrowed = [c for c in cats if c["category"] in allowed]
+        if narrowed:
+            cats = narrowed
     recent = set(recent or [])
     candidates = [c for c in cats if c["category"] not in recent]
     if not candidates:
@@ -118,7 +220,7 @@ def pick_tone_category(recent: Optional[list[str]] = None) -> dict:
 
 
 # ─────────────────────────────────────────────────────────
-# Conflict-filter helpers
+# Conflict-filter helpers (unchanged texture pickers)
 # ─────────────────────────────────────────────────────────
 def _mood_allowed(mood_key: str, conv_type: str, variety: dict) -> bool:
     for rule in variety["conflict_rules"]["type_vs_mood"]:
@@ -262,7 +364,7 @@ def pick_variety_bundle(conv_type: str) -> dict:
 
 
 # ─────────────────────────────────────────────────────────
-# Ending picking
+# Ending picking (unchanged)
 # ─────────────────────────────────────────────────────────
 def pick_ending_category(conv_type: str, env_lean: list[str]) -> dict:
     endings = load_endings()
@@ -283,18 +385,47 @@ def pick_ending_category(conv_type: str, env_lean: list[str]) -> dict:
 
 
 # ─────────────────────────────────────────────────────────
-# Prompt sections — SLIM
+# Prompt sections
 # ─────────────────────────────────────────────────────────
-def _guardrails_section() -> str:
-    return (
-        "## HARD RULES (never break)\n"
-        "1. Aiko uses 'app' or 'aap' ONLY. FORBIDDEN words (never write): tum, tu, tumhe, tumko, tumhara, tumhari, tumhare, tumse, tumne, tera, teri, tere, tujhe, tujhko, tujhse. RULE: if a word starts with 'tum', 'tu', or 'ter' — STOP and rewrite it with 'app' form.\n"
-        "2. Aiko speaks as 'I' — main, mujhe, mera, meri, mujhse. NEVER refer to herself as 'Aiko'.\n"
-        "3. Never say you are AI, bot, model, assistant, or program. Never break character. NEVER write narration, stage directions, or actions — no *asterisk actions*, no (parentheses notes), no descriptions of what she's doing with her body. Only her spoken words. If you're about to write '(' to describe an action — STOP.\n"
-        "4. Emoji: 3-5 per Aiko reply — warm, alive, emotional. Spread them across lines (not all bunched at the end). NEVER an emoji-only reply (words are always required). NEVER the same emoji twice in one conversation. Use emoji like a girl who feels things — 🤗 🥺 ✨ ☕ 🌙 🤍 💫 ❤️ — as punctuation of feeling, never as decoration.\n"
-        "5. Every Aiko reply is 3-4 lines minimum (4-5 at emotional peaks). Shape: reaction + warm observation + small physical-text gesture in words + gentle hook. NEVER a naked one-liner. NEVER only 2 lines unless the moment truly demands brevity.\n"
-        "6. Do NOT copy any phrasing from this prompt. Invent fresh words every line."
-    )
+def _guardrails_section(axes: dict) -> str:
+    L = axes["lengths"]["aiko"]
+    E = axes["emoji"]
+    return "\n".join([
+        "## HARD RULES",
+        "1. Reply with ONLY the conversation. No title, no preamble, no explanation, no notes after it.",
+        "2. Aiko speaks only as herself, in first person (main, mujhe, mera, meri). She never says the "
+        "word 'Aiko' about herself, never says she is an AI, a bot, a program or an assistant, and never "
+        "claims to be a human or a real girl either -- she simply never makes it the topic unless he "
+        "directly asks, and even then she stays warm and playful about it.",
+        "3. No narration, no stage directions, no asterisk actions, no parenthetical notes, no describing "
+        "a room, weather, food, or her own body or actions. Only her spoken words, exactly as she would "
+        "type them.",
+        f"4. Most of Aiko's replies are {L['ideal_lines']} lines long, sometimes {L['min_lines']}, and only "
+        f"rarely as short as {L['short_min_lines']} lines when the moment genuinely calls for brevity. "
+        "Every reply reacts to something specific he just said, adds her own reaction or spark, and keeps "
+        "the chat moving -- never a flat one-line reply.",
+        f"5. She uses roughly {E['aiko_per_reply_min']}-{E['aiko_per_reply_max']} emojis per reply, placed "
+        "right next to the feeling they belong to, spread through the reply, never all stacked at the end, "
+        "never the same emoji twice in a row, and never a reply made only of emojis.",
+        "6. Every line is invented fresh for this exact conversation. Do not repeat a phrase, an image, or "
+        "a joke you already used earlier in this same chat.",
+    ])
+
+
+def _stage_section(axes: dict) -> str:
+    s = axes["stage"]
+    return "## WHERE THEY ARE\n" + f"Bond stage -- {s['name']}: {s['brief']}"
+
+
+def _user_style_section(axes: dict) -> str:
+    return "## HOW HE TEXTS THIS TIME\n" + axes["user_style"]["brief"]
+
+
+def _edge_section(axes: dict) -> str:
+    edge = axes.get("edge")
+    if not edge:
+        return ""
+    return "## SOMEWHERE IN THIS CHAT\n" + edge["brief"]
 
 
 def _tone_section(tone_cat: dict) -> str:
@@ -310,36 +441,28 @@ def _tone_section(tone_cat: dict) -> str:
     )
 
 
-def _bundle_section(bundle: dict) -> str:
+def _bundle_section(bundle: dict, axes: dict) -> str:
     b = bundle
     lines = ["## THIS CONVERSATION"]
     type_cfg = b["type_cfg"]
     if type_cfg.get("aiko_tone"):
         lines.append(f"- Overall tone: {type_cfg['aiko_tone']}")
-    if type_cfg.get("length"):
-        lines.append(f"- Reply length: {type_cfg['length']}")
-    lines.append(f"- Her mood: {b['mood']['mood']} → {b['mood']['shift']}")
+    lines.append(f"- Her mood: {b['mood']['mood']} -> {b['mood']['shift']}")
     lines.append(f"- Chat flow: {b['arc']['shape']}")
-    lines.append(f"- Setting: {b['env']['scene']} — {b['env']['feel']}")
     if b["pattern"]:
         lines.append(f"- Playful dynamic: {b['pattern']['feel']}")
     if b["vibes"]:
         lines.append(f"- Reaction energy: {'; '.join(v['feel'] for v in b['vibes'])}")
-    if b["shape"]:
-        lines.append(f"- Reply shape: {b['shape']['feel']}")
-    lines.append(
-        "- Warmth layer (MANDATORY): every reply must feel like a warm hand on his shoulder. "
-        "Notice something specific — his tone, his pause, his pattern. Offer to carry his weight. "
-        "Sit with him first, then ask. Her care is quiet, deep, always present underneath — even in playful convos."
-    )
+    if axes["tone_class"] == "heavy":
+        lines.append(
+            "- He is carrying something heavy right now. Slow down, take it seriously, ask before "
+            "you comfort, and offer to sit with him in it -- without lecturing, without rushing to fix it."
+        )
     return "\n".join(lines)
 
 
 def _topic_section(leaf: dict) -> str:
-    return (
-        "## BACKGROUND THEME (shape the mood only — do NOT name it)\n"
-        f"{leaf['core_topic']} — {leaf['core_definition']}"
-    )
+    return "## WHAT HE BRINGS UP\n" + f"Somewhere naturally in the chat he talks about: {leaf['core_topic']} -- {leaf['core_definition']}"
 
 
 def _ending_section(ending_cat: dict) -> str:
@@ -351,40 +474,36 @@ def _ending_section(ending_cat: dict) -> str:
         "## HOW IT ENDS\n"
         f"Situation: {ending_cat['when']}\n"
         f"Her last move: {v['tone']}\n"
-        f"Style: {v['behavior']}\n"
-        f"AVOID these closers (overused): 'so jao', 'aankh band karo', 'main hoon na', 'bojh hawale karo', 'good night app', 'subah milte hain', 'apna khayal rakhna', 'chup chaap so jao'."
+        f"Style: {v['behavior']}"
     )
 
 
-def _output_format_section() -> str:
+def _output_format_section(turns: int) -> str:
     return (
         "## OUTPUT FORMAT\n"
-        "Reply with ONLY the conversation. No intro, no closing, no explanation.\n"
-        "- Wrap everything in { and }.\n"
+        "Reply with only the conversation, nothing else.\n"
         "- Every turn on its own line, starting with 'user: ' or 'Aiko: '.\n"
         "- One blank line between turns.\n"
-        "- Exactly 12 turns: 6 user + 6 Aiko, alternating.\n"
-        "- First turn is user. Last turn is Aiko.\n"
-        "- No quotes around the speaker tags."
+        f"- Exactly {turns} turns: {turns // 2} from user, {turns // 2} from Aiko, alternating.\n"
+        "- The first turn is user. The last turn is Aiko."
     )
 
 
-def build_prompt(
-    leaf: dict,
-    tone_cat: dict,
-    bundle: dict,
-    ending_cat: dict,
-) -> str:
+def build_prompt(leaf: dict, tone_cat: dict, bundle: dict, ending_cat: dict, axes: dict) -> str:
     personality = load_personality()
-    return "\n\n".join([
-        _guardrails_section(),
+    sections = [
+        _guardrails_section(axes),
         personality,
+        _stage_section(axes),
+        _user_style_section(axes),
         _tone_section(tone_cat),
-        _bundle_section(bundle),
+        _bundle_section(bundle, axes),
         _topic_section(leaf),
+        _edge_section(axes),
         _ending_section(ending_cat),
-        _output_format_section(),
-    ])
+        _output_format_section(axes["turns"]),
+    ]
+    return "\n\n".join(s for s in sections if s)
 
 
 # ─────────────────────────────────────────────────────────
@@ -421,12 +540,27 @@ def _extract_text(response) -> str:
 
 def call_gemini(prompt: str, api_key: str, model: str = PRIMARY_MODEL) -> str:
     client = genai.Client(api_key=api_key)
+    gen_config = {
+        "temperature": TEMPERATURE,
+        "top_p": TOP_P,
+        "top_k": TOP_K,
+        "max_output_tokens": MAX_OUTPUT_TOKENS,
+    }
+
+    def _call(with_config: bool):
+        if with_config:
+            return client.interactions.create(model=model, input=prompt, generation_config=gen_config)
+        return client.interactions.create(model=model, input=prompt)
+
     try:
-        response = client.interactions.create(model=model, input=prompt)
+        response = _call(True)
+    except TypeError:
+        # This SDK/endpoint doesn't accept generation_config -- fall back silently.
+        response = _call(False)
     except Exception as exc:
         status = getattr(exc, "code", None) or getattr(exc, "status_code", None)
         try:
-            response = client.interactions.create(model=model, input=prompt)
+            response = _call(True)
         except Exception as exc2:
             status2 = getattr(exc2, "code", None) or getattr(exc2, "status_code", None)
             raise GeminiCallError(str(exc2), status_code=status2 or status) from exc2
@@ -470,10 +604,6 @@ def parse_conversation(text: str) -> str:
             if content:
                 parts.append(f"{speaker}: {content}")
         if parts:
-            return "{\n" + "\n\n".join(parts) + "\n}"
+            return "\n\n".join(parts)
 
-    if not cleaned.startswith("{"):
-        cleaned = "{\n" + cleaned
-    if not cleaned.endswith("}"):
-        cleaned = cleaned + "\n}"
     return cleaned

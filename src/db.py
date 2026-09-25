@@ -27,7 +27,7 @@ _client: Optional[MongoClient] = None
 _db: Optional[Database] = None
 
 
-RUN_LOCK_SLOTS = ["1", "2", "3", "4", "5"]
+RUN_LOCK_SLOTS = ["1", "2", "3", "4", "5", "6"]
 RUN_LOCK_TTL_SECONDS = 60 * 60
 SIGNATURE_BUFFER_CAP = 5000
 SCENARIO_BUFFER_CAP = 50
@@ -108,7 +108,7 @@ def acquire_run_lock() -> Optional[str]:
             logger.info("Run lock taken over (slot %s): %s", slot, run_id[:8])
             return lock_id
 
-    logger.warning("All 4 run-lock slots busy, skipping")
+    logger.warning("All %d run-lock slots busy, skipping", len(RUN_LOCK_SLOTS))
     return None
 
 

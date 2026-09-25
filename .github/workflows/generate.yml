@@ -7,6 +7,10 @@ jobs:
   generate:
     runs-on: ubuntu-latest
     timeout-minutes: 55
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4, 5, 6]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -19,8 +23,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run generator
+      - name: Run generator (slot ${{ matrix.slot }})
         env:
+          SLOT_ID: ${{ matrix.slot }}
           GEMINI_KEY_1: ${{ secrets.GEMINI_KEY_1 }}
           GEMINI_KEY_2: ${{ secrets.GEMINI_KEY_2 }}
           GEMINI_KEY_3: ${{ secrets.GEMINI_KEY_3 }}
@@ -48,6 +53,9 @@ jobs:
           GEMINI_KEY_25: ${{ secrets.GEMINI_KEY_25 }}
           GEMINI_KEY_26: ${{ secrets.GEMINI_KEY_26 }}
           GEMINI_KEY_27: ${{ secrets.GEMINI_KEY_27 }}
+          GEMINI_KEY_28: ${{ secrets.GEMINI_KEY_28 }}
+          GEMINI_KEY_29: ${{ secrets.GEMINI_KEY_29 }}
+          GEMINI_KEY_30: ${{ secrets.GEMINI_KEY_30 }}
           MONGO_URI: ${{ secrets.MONGO_URI }}
           MONGO_DB_NAME: ${{ secrets.MONGO_DB_NAME }}
           GH_PAT: ${{ secrets.GH_PAT }}

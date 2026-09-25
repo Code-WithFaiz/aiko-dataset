@@ -1,6 +1,6 @@
 # src/dedup.py
 """
-Non-repeat / duplicate detection (Section 4.6).
+Non-repeat / duplicate detection.
 """
 from __future__ import annotations
 
@@ -66,3 +66,31 @@ def is_duplicate(
             return True, "opening_similarity>0.95"
 
     return False, "unique"
+
+
+# ---- Within-run repeated-phrase guard ----
+# In-memory only: resets every GitHub Actions run (process restarts each
+# time). It catches Aiko reusing the same 4-word phrase too often inside
+# one ~50-minute run. Catching repeats ACROSS days needs a small MongoDB
+# counter in db.py -- worth adding once the new prompt has been tested and
+# you can see whether repeats are still a problem.
+_PHRASE_COUNTS: dict[str, int] = {}
+PHRASE_N = 4
+PHRASE_OVERUSE_LIMIT = 3
+
+
+def _phrase_ngrams(text: str, n: int = PHRASE_N) -> list[str]:
+    words = normalize("\n".join(_extract_aiko_lines(text))).split()
+    return [" ".join(words[i:i + n]) for i in range(len(words) - n + 1)]
+
+
+def check_and_record_phrases(text: str, limit: int = PHRASE_OVERUSE_LIMIT) -> tuple[bool, str]:
+    """Returns (is_overused, phrase). Call only on a conversation you are
+    about to accept -- it checks AND records in the same step."""
+    grams = set(_phrase_ngrams(text))
+    for g in grams:
+        if _PHRASE_COUNTS.get(g, 0) >= limit:
+            return True, g
+    for g in grams:
+        _PHRASE_COUNTS[g] = _PHRASE_COUNTS.get(g, 0) + 1
+    return False, ""

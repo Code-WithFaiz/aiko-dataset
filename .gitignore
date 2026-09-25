@@ -37,3 +37,6 @@ env/
 .DS_Store
 Thumbs.db
 *.swp
+
+# patcher backups
+.patch_backup/

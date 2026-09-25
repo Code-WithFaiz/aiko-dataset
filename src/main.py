@@ -31,6 +31,7 @@ from src.generator import (
     flatten_topics,
     load_category_map,
     parse_conversation,
+    pick_axes,
     pick_ending_category,
     pick_tone_category,
     pick_variety_bundle,
@@ -49,9 +50,17 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 CONFIG_DIR = Path("config")
-LOOP_ITERATIONS = int(os.getenv("BATCH_SIZE", "100"))
+def _env_int(name, default):
+    val = os.getenv(name, "")
+    try:
+        return int(val) if val.strip() else default
+    except ValueError:
+        return default
+
+
+LOOP_ITERATIONS = _env_int("BATCH_SIZE", 100)
 BATCH_UPLOAD_THRESHOLD = 15
-DAILY_TARGET = int(os.getenv("DAILY_TARGET", "6700"))
+DAILY_TARGET = _env_int("DAILY_TARGET", 6700)
 RUN_DEADLINE_SECONDS = 52 * 60
 TONE_HISTORY_SIZE = 25
 RATE_LIMIT_COOLDOWN_SECONDS = 90
@@ -103,49 +112,54 @@ def generate_one(
     leaf: dict,
     recent_tone_cats: list[str],
     deadline: float | None = None,
-) -> tuple[str | None, str]:
-    """Returns (conversation_text_or_None, reason)."""
+) -> tuple[str | None, str, list[str]]:
+    """Returns (conversation_text_or_None, reason, flags)."""
     recent_signatures = db.get_recent_signatures()
     recent_openings = db.get_recent_openings()
     category_map = load_category_map()
 
     for attempt in range(1, 4):
         if deadline is not None and time.monotonic() >= deadline:
-            return None, "deadline_reached"
+            return None, "deadline_reached", []
 
-        # 1. Pick tone category (avoids recent ones)
-        tone_cat = pick_tone_category(recent_tone_cats)
+        # 1. Pick this conversation's axes: bond stage, tone class, turns, user style, edge slice
+        axes = pick_axes(leaf, recent_tone_cats)
+
+        # 2. Pick tone category (avoids recent ones, respects the picked axes)
+        tone_cat = pick_tone_category(recent_tone_cats, allowed=axes["allowed_categories"])
         cat_name = tone_cat["category"]
 
-        # 2. Map to conversation type
+        # 3. Map to conversation type
         conv_type = category_map.get(cat_name, "playful-banter")
 
-        # 3. Build variety bundle
+        # 4. Build variety bundle
         bundle = pick_variety_bundle(conv_type)
 
-        # 4. Pick ending category
+        # 5. Pick ending category
         ending_cat = pick_ending_category(
             conv_type, bundle["env"].get("ending_lean", [])
         )
 
-        # 5. Build prompt
-        prompt = build_prompt(leaf, tone_cat, bundle, ending_cat)
+        # 6. Build prompt
+        prompt = build_prompt(leaf, tone_cat, bundle, ending_cat, axes)
 
-        # 6. Call Gemini
+        # 7. Call Gemini
         text = _call_with_key_rotation(key_rotator, prompt, deadline=deadline)
         if text is None:
-            return None, "all_keys_exhausted"
+            return None, "all_keys_exhausted", []
 
-        # 7. Validate
+        # 8. Validate + safe-fix (address forms, emoji, soft-quality flags)
         conversation = parse_conversation(text)
-        ok, reason = validator.validate(conversation)
-        if not ok:
-            logger.warning("Validation reject (attempt %d): %s", attempt, reason)
+        result = validator.process(conversation)
+        if not result["ok"]:
+            logger.warning("Validation reject (attempt %d): %s", attempt, result["reason"])
             if attempt == 3:
-                return None, f"rejected_validation:{reason}"
+                return None, f"rejected_validation:{result['reason']}", []
             continue
+        conversation = result["text"]
+        flags = result["flags"]
 
-        # 8. Dedup
+        # 9. Dedup (on the fixed text, so parser edits don't create false dupes)
         is_dup, dup_reason = dedup.is_duplicate(
             conversation, db.hash_exists, recent_signatures, recent_openings
         )
@@ -153,14 +167,23 @@ def generate_one(
             logger.warning("Dedup reject (attempt %d): %s", attempt, dup_reason)
             if attempt == 3:
                 _track_tone(recent_tone_cats, cat_name)
-                return conversation, "accepted_after_dedup_retries_exhausted"
+                return conversation, "accepted_after_dedup_retries_exhausted", flags
             continue
 
-        # 9. Success
-        _track_tone(recent_tone_cats, cat_name)
-        return conversation, "ok"
+        # 9b. Within-run repeated-phrase guard
+        overused, phrase = dedup.check_and_record_phrases(conversation)
+        if overused:
+            logger.warning("Dedup reject (attempt %d): repeated_phrase(%r)", attempt, phrase)
+            if attempt == 3:
+                _track_tone(recent_tone_cats, cat_name)
+                return conversation, "accepted_after_dedup_retries_exhausted", flags
+            continue
 
-    return None, "exhausted_retries"
+        # 10. Success
+        _track_tone(recent_tone_cats, cat_name)
+        return conversation, "ok", flags
+
+    return None, "exhausted_retries", []
 
 
 # ─────────────────────────────────────────────────────────
@@ -274,6 +297,7 @@ def _run_locked() -> int:
         return 1
 
     batch: list[str] = []
+    flagged_batch: list[tuple[str, list[str]]] = []
     generated = 0
     rejected = 0
     recent_tone_cats: list[str] = []
@@ -306,7 +330,7 @@ def _run_locked() -> int:
         leaf = leaf_by_path[leaf_path]
 
         try:
-            conversation, reason = generate_one(
+            conversation, reason, flags = generate_one(
                 key_rotator, leaf, recent_tone_cats, deadline=deadline,
             )
         except Exception as exc:
@@ -331,16 +355,24 @@ def _run_locked() -> int:
         db.add_signature(dedup.signature(conversation))
         db.add_opening(dedup.opening_text(conversation))
 
-        batch.append(conversation)
+        if flags:
+            flagged_batch.append((conversation, flags))
+        else:
+            batch.append(conversation)
         db.increment_leaf_generated(leaf_path, 1)
         generated += 1
 
         if len(batch) >= BATCH_UPLOAD_THRESHOLD:
             _flush_batch(batch)
             batch = []
+        if len(flagged_batch) >= BATCH_UPLOAD_THRESHOLD:
+            storage.save_flagged(flagged_batch)
+            flagged_batch = []
 
     if batch:
         _flush_batch(batch)
+    if flagged_batch:
+        storage.save_flagged(flagged_batch)
 
     db.record_generated(generated, rejected)
     logger.info(

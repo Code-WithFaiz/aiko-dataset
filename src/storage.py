@@ -20,6 +20,11 @@ GITHUB_API = "https://api.github.com"
 LOCAL_BATCH_DIR = Path("data/batches")
 
 
+def _slot_suffix() -> str:
+    slot = os.getenv("SLOT_ID", "").strip()
+    return f"_s{slot}" if slot else ""
+
+
 def _headers() -> dict:
     token = os.getenv("GH_PAT")
     if not token:
@@ -79,7 +84,7 @@ def upload_batch(conversations: list[str]) -> tuple[bool, str]:
     local file, log, continue).
     """
     now = datetime.now(timezone.utc)
-    filename = f"batch_{now.strftime('%Y%m%d_%H%M%S')}.jsonl"
+    filename = f"batch_{now.strftime('%Y%m%d_%H%M%S')}{_slot_suffix()}.jsonl"
     local_path = write_local_batch(conversations, filename)
 
     tag = f"batch-{now.strftime('%Y-%m-%d')}"
@@ -102,3 +107,18 @@ def upload_batch(conversations: list[str]) -> tuple[bool, str]:
     except (requests.RequestException, OSError) as exc:
         logger.error("Exception uploading batch asset: %s", exc)
         return False, ""
+
+
+def save_flagged(items: list[tuple[str, list[str]]]) -> Path:
+    """Local-only bucket for conversations that passed the hard checks but
+    were flagged for a soft quality issue. Never uploaded to GitHub
+    Releases -- kept only so you can spot-check them by hand."""
+    flagged_dir = Path("data/flagged")
+    flagged_dir.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(timezone.utc)
+    path = flagged_dir / f"flagged_{now.strftime('%Y%m%d_%H%M%S')}{_slot_suffix()}.jsonl"
+    with path.open("w", encoding="utf-8") as f:
+        for conv, flags in items:
+            f.write(json.dumps({"conversation": conv, "flags": flags}, ensure_ascii=False) + "\n")
+    logger.info("Saved %d flagged conversations locally to %s", len(items), path)
+    return path
