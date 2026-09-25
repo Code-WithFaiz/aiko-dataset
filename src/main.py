@@ -372,7 +372,7 @@ def _run_locked() -> int:
         _flush_batch(batch, tag_prefix="batch")
     if flagged_batch:
         _flush_batch([c for c, _ in flagged_batch], tag_prefix="flagged")
-			
+
     db.record_generated(generated, rejected)
     logger.info(
         "Run complete: generated=%d rejected=%d%s",
@@ -396,11 +396,11 @@ def _flush_batch(batch: list[dict], tag_prefix: str = "batch") -> None:
         logger.error("%s batch upload failed; %d conversations kept locally only", tag_prefix, len(batch))
 
 
-def _maybe_send_daily_report() -> None:          # ← YEH ADD KARO
-    try:                                         # ← YEH ADD KARO
-        notifier.send_daily_report()             # ← YEH ADD KARO
-    except Exception as exc:                     # ← YEH ADD KARO
-        logger.error("Failed to send daily report: %s", exc)   # ← YEH ADD KARO
+def _maybe_send_daily_report() -> None:
+    try:
+        notifier.send_daily_report()
+    except Exception as exc:
+        logger.error("Failed to send daily report: %s", exc)
 
 
 if __name__ == "__main__":
