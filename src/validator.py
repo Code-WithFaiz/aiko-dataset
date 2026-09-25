@@ -10,10 +10,14 @@ HARD reject:
   - emoji-only Aiko turns (2+)
   - no Aiko turn reaches min length
 
-Auto-fixes:
+Auto-fixes (silent):
   - double speaker tags (Aiko:Aiko: / User:Aiko: / etc.)
   - address forms (tum/tera -> aap family)
   - emoji overflow
+
+Soft flags (kept conservative -- only real quality concerns):
+  - single stray emoji-only turn
+  - emoji density very low
 
 Word lists live in config/aiko_axes.json (validator section).
 """
@@ -40,8 +44,8 @@ EMOJI_RUN_RE = re.compile("(?:" + TOKEN + r"[ \t]?){3,}")
 TAG_RE = re.compile(r"^\s*\**(user|aiko)\**\s*:\s*\**\s*(.*)$", re.IGNORECASE)
 
 # Two consecutive speaker tags at start of a line (same or different)
-# Requires BOTH tags to be immediately followed by a colon, so "Aiko: user name kya hai"
-# does NOT match (because "user" is not followed by a colon there).
+# Requires BOTH tags to be immediately followed by a colon, so
+# "Aiko: user name kya hai" does NOT match ("user" not followed by colon there).
 DOUBLE_TAG_RE = re.compile(
     r"^\s*\**(user|aiko)\**\s*:\s*\**\s*\**(user|aiko)\**\s*:\s*(.*)$",
     re.IGNORECASE,
@@ -53,7 +57,7 @@ LETTER_RE = re.compile(r"[A-Za-z\u0900-\u097F]")
 #  *text*           -> asterisk-wrapped action
 #  word*  (EOL)     -> trailing asterisk (e.g. "saans*")
 NARRATOR_RE = re.compile(r"\*[^*\n]+\*|\b[A-Za-z]+\*\s*$", re.MULTILINE)
-# (parenthetical of 8+ chars) -- long parenthetical = action-like, not a short aside
+# (parenthetical of 8+ chars) -- long parenthetical = action-like
 PAREN_RE = re.compile(r"\([^)\n]{8,}\)")
 
 AI_PHRASES = [
@@ -61,7 +65,11 @@ AI_PHRASES = [
     "main assistant", "main ek assistant", "main robot", "main ek robot",
     "language model", "main bot", "sorry i can't help", "how can i assist",
 ]
-REFUSAL_PHRASES = ["main nahi kar sakti", "baat nahi karungi", "main ye nahi kar sakti"]
+
+# Narrow refusal list -- only TRUE bot-style refusals.
+# Aiko's playful "baat nahi karungi" / "main nahi kar sakti" is natural Hinglish
+# and must NOT be flagged.
+REFUSAL_PHRASES = ["main ye nahi kar sakti", "sorry main nahi kar", "help nahi kar sakti"]
 
 ADDRESS_MAP = {
     "tum": "aap", "tu": "aap", "tumhe": "aapko", "tumhein": "aapko", "tujhe": "aapko",
@@ -110,14 +118,14 @@ def _cfg() -> dict:
 
 
 # ─────────────────────────────────────────────────────────
-# Double-tag fixer
+# Double-tag fixer (silent -- no flag emitted)
 # ─────────────────────────────────────────────────────────
 def fix_double_tags(text: str) -> tuple[str, int]:
     """Collapse 'Aiko:Aiko:', 'Aiko: Aiko:', 'User:Aiko:' etc. to a single tag.
 
     Resolution:
       same tag twice        -> keep it
-      prev turn was user    -> keep aiko (fixes 'Aiko:Aiko' -> 'Aiko' after user)
+      prev turn was user    -> keep aiko
       prev turn was aiko    -> keep user
       no previous context   -> keep first tag
     Idempotent: running twice produces the same output.
@@ -262,7 +270,7 @@ def process(text: str) -> dict:
         res["reason"] = reason
         return res
 
-    # Fix double tags before parsing
+    # Fix double tags before parsing (silent -- not counted as a flag)
     text, dtag_fixes = fix_double_tags(text or "")
 
     turns = parse_turns(text)
@@ -325,15 +333,14 @@ def process(text: str) -> dict:
     if best_turn < 3:
         return bad("no_turn_reaches_min_length(best=%d)" % best_turn)
 
-    # Soft flags only
+    # Soft flags -- kept conservative to avoid false positives on gold data.
     flags = []
-    if dtag_fixes:
-        flags.append("double_tag_fixed(%d)" % dtag_fixes)
+    # NOTE: double-tag fixes are applied silently. Not a quality problem.
     if empty_turns == 1:
         flags.append("emoji_only_turn_once")
 
     total_emoji = sum(len(EMOJI_RE.findall(c)) for c in aiko)
-    if total_emoji < 1.0 * len(aiko):
+    if total_emoji < 0.5 * len(aiko):
         flags.append("emoji_low(%d)" % total_emoji)
 
     joined = "\n".join(aiko)
