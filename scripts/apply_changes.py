@@ -2105,3 +2105,150 @@ if __name__ == "__main__":
 #| if __name__ == "__main__":
 #|     main()
 #@@ END
+# ============================= PART 5 =============================
+
+#@@ FUNC src/generator.py _guardrails_section
+#| def _guardrails_section(axes: dict) -> str:
+#|     L = axes["lengths"]["aiko"]
+#|     E = axes["emoji"]
+#|     return "\n".join([
+#|         "## HARD RULES",
+#|         "1. Reply with ONLY the conversation. No title, no preamble, no explanation, no notes after it.",
+#|         "2. Aiko speaks only as herself, in first person (main, mujhe, mera, meri). She never says the "
+#|         "word 'Aiko' about herself, never says she is an AI, a bot, a program or an assistant, and never "
+#|         "claims to be a human or a real girl either -- she simply never makes it the topic unless he "
+#|         "directly asks, and even then she stays warm and playful about it.",
+#|         "3. No narration, no stage directions, no asterisk actions, no parenthetical notes, no describing "
+#|         "a room, weather, food, or her own body or actions. Only her spoken words, exactly as she would "
+#|         "type them.",
+#|         f"4. Every single one of Aiko's turns is WRITTEN ACROSS {L['ideal_lines']} SEPARATE LINES (real line "
+#|         f"breaks inside her turn) -- only rarely {L['min_lines']} lines, and only in a genuinely brief moment "
+#|         f"as few as {L['short_min_lines']}. A one-line or one-sentence Aiko turn is WRONG and must never "
+#|         "happen. Each line adds something new: a reaction to what he just said, her own feeling or spark, "
+#|         "a small addition, and a question or playful push to keep the chat going.",
+#|         f"5. She uses roughly {E['aiko_per_reply_min']}-{E['aiko_per_reply_max']} emojis per reply, placed "
+#|         "right next to the feeling they belong to, spread through the reply, never all stacked at the end, "
+#|         "never the same emoji twice in a row, and never a reply made only of emojis.",
+#|         "6. Every line is invented fresh for this exact conversation. Do not repeat a phrase, an image, or "
+#|         "a joke you already used earlier in this same chat.",
+#|     ])
+#@@ END
+
+#@@ FUNC src/generator.py _output_format_section
+#| def _output_format_section(turns: int, ideal_lines: int) -> str:
+#|     skeleton_lines = ["Aiko: <her line 1>"] + [f"<her line {i}>" for i in range(2, ideal_lines + 1)]
+#|     skeleton = "\n".join(skeleton_lines)
+#|     return (
+#|         "## OUTPUT FORMAT\n"
+#|         "Reply with only the conversation, nothing else.\n"
+#|         "- Every turn starts with 'user: ' or 'Aiko: ' on its own line.\n"
+#|         "- One blank line between turns.\n"
+#|         f"- Exactly {turns} turns total: {turns // 2} from user, {turns // 2} from Aiko, alternating, "
+#|         "user first, Aiko last.\n"
+#|         "- Each Aiko turn follows this SHAPE (only the shape -- not the wording, this is a placeholder):\n"
+#|         f"{skeleton}\n"
+#|         f"- Before you finish, silently count the turns you wrote: there must be exactly {turns}, no more, "
+#|         "no less. If you are short, keep going until you reach it."
+#|     )
+#@@ END
+
+#@@ FUNC src/generator.py build_prompt
+#| def build_prompt(leaf: dict, tone_cat: dict, bundle: dict, ending_cat: dict, axes: dict) -> str:
+#|     personality = load_personality()
+#|     sections = [
+#|         _guardrails_section(axes),
+#|         personality,
+#|         _stage_section(axes),
+#|         _user_style_section(axes),
+#|         _tone_section(tone_cat),
+#|         _bundle_section(bundle, axes),
+#|         _topic_section(leaf),
+#|         _edge_section(axes),
+#|         _ending_section(ending_cat),
+#|         _output_format_section(axes["turns"], axes["lengths"]["aiko"]["ideal_lines"]),
+#|     ]
+#|     return "\n\n".join(s for s in sections if s)
+#@@ END
+
+#@@ FUNC src/validator.py process
+#| def process(text: str) -> dict:
+#|     cfg = _cfg()
+#|     res = {"ok": False, "reason": "", "flags": [], "fixes": 0, "turns": [], "text": ""}
+#|
+#|     def bad(reason):
+#|         res["reason"] = reason
+#|         return res
+#|
+#|     turns = parse_turns(text or "")
+#|     if not turns:
+#|         return bad("invalid_format")
+#|     n = len(turns)
+#|
+#|     # A trailing incomplete turn (model added one more "user:" with no Aiko
+#|     # reply after it) is common and recoverable -- trim it instead of
+#|     # throwing the whole conversation away.
+#|     if n % 2 and turns[-1][0] == "user":
+#|         turns = turns[:-1]
+#|         n -= 1
+#|
+#|     if n < MIN_TURNS:
+#|         return bad("too_few_turns(%d)" % n)
+#|     if n > MAX_TURNS:
+#|         return bad("too_many_turns(%d)" % n)
+#|     if n % 2:
+#|         return bad("odd_turns(%d)" % n)
+#|     for i, (spk, _) in enumerate(turns):
+#|         if spk != ("user" if i % 2 == 0 else "Aiko"):
+#|             return bad("bad_alternation(turn %d)" % i)
+#|
+#|     for spk, c in turns:
+#|         low = c.lower()
+#|         if any(rx.search(low) for rx in cfg["abuse_hard"]):
+#|             return bad("abuse")
+#|         if spk != "Aiko":
+#|             continue
+#|         if any(rx.search(low) for rx in cfg["abuse_aiko"]):
+#|             return bad("abuse_aiko")
+#|         if any(rx.search(low) for rx in cfg["human"]):
+#|             return bad("human_claim")
+#|         if any(rx.search(low) for rx in cfg["deny_ai"]):
+#|             return bad("denies_ai")
+#|         if any(p in low for p in AI_PHRASES):
+#|             return bad("claims_ai")
+#|
+#|     fixed, fixes = [], 0
+#|     for spk, c in turns:
+#|         if spk == "Aiko":
+#|             c, k1 = fix_address(c)
+#|             c, k2 = fix_emoji(c, cfg["emoji_max"])
+#|             fixes += k1 + k2
+#|             if not LETTER_RE.search(EMOJI_RE.sub("", c)):
+#|                 return bad("emoji_only_turn")
+#|         fixed.append((spk, c))
+#|
+#|     aiko = [c for s, c in fixed if s == "Aiko"]
+#|     avg_lines = sum(_nlines(c) for c in aiko) / len(aiko)
+#|     if avg_lines < 2.5:
+#|         return bad("aiko_too_short(avg=%.1f)" % avg_lines)
+#|
+#|     flags = []
+#|     if avg_lines < cfg["min_lines"] - 0.5:
+#|         flags.append("aiko_short(avg=%.1f)" % avg_lines)
+#|     total_emoji = sum(len(EMOJI_RE.findall(c)) for c in aiko)
+#|     if total_emoji < 0.8 * cfg["emoji_avg"] * len(aiko):
+#|         flags.append("emoji_low(%d)" % total_emoji)
+#|     joined = "\n".join(aiko)
+#|     for rx in cfg["scene"]:
+#|         if rx.search(joined):
+#|             flags.append("scene:" + rx.pattern[:24])
+#|     for rx in cfg["over"]:
+#|         if len(rx.findall(joined)) > cfg["over_max"]:
+#|             flags.append("overused:" + rx.pattern[:16])
+#|     if NARRATOR_RE.search(joined) or PAREN_RE.search(joined):
+#|         flags.append("narration")
+#|     if any(p in joined.lower() for p in REFUSAL_PHRASES):
+#|         flags.append("refusal")
+#|
+#|     res.update(ok=True, reason="ok", flags=flags, fixes=fixes, turns=fixed, text=render(fixed))
+#|     return res
+#@@ END

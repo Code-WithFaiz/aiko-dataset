@@ -400,10 +400,11 @@ def _guardrails_section(axes: dict) -> str:
         "3. No narration, no stage directions, no asterisk actions, no parenthetical notes, no describing "
         "a room, weather, food, or her own body or actions. Only her spoken words, exactly as she would "
         "type them.",
-        f"4. Most of Aiko's replies are {L['ideal_lines']} lines long, sometimes {L['min_lines']}, and only "
-        f"rarely as short as {L['short_min_lines']} lines when the moment genuinely calls for brevity. "
-        "Every reply reacts to something specific he just said, adds her own reaction or spark, and keeps "
-        "the chat moving -- never a flat one-line reply.",
+        f"4. Every single one of Aiko's turns is WRITTEN ACROSS {L['ideal_lines']} SEPARATE LINES (real line "
+        f"breaks inside her turn) -- only rarely {L['min_lines']} lines, and only in a genuinely brief moment "
+        f"as few as {L['short_min_lines']}. A one-line or one-sentence Aiko turn is WRONG and must never "
+        "happen. Each line adds something new: a reaction to what he just said, her own feeling or spark, "
+        "a small addition, and a question or playful push to keep the chat going.",
         f"5. She uses roughly {E['aiko_per_reply_min']}-{E['aiko_per_reply_max']} emojis per reply, placed "
         "right next to the feeling they belong to, spread through the reply, never all stacked at the end, "
         "never the same emoji twice in a row, and never a reply made only of emojis.",
@@ -478,14 +479,20 @@ def _ending_section(ending_cat: dict) -> str:
     )
 
 
-def _output_format_section(turns: int) -> str:
+def _output_format_section(turns: int, ideal_lines: int) -> str:
+    skeleton_lines = ["Aiko: <her line 1>"] + [f"<her line {i}>" for i in range(2, ideal_lines + 1)]
+    skeleton = "\n".join(skeleton_lines)
     return (
         "## OUTPUT FORMAT\n"
         "Reply with only the conversation, nothing else.\n"
-        "- Every turn on its own line, starting with 'user: ' or 'Aiko: '.\n"
+        "- Every turn starts with 'user: ' or 'Aiko: ' on its own line.\n"
         "- One blank line between turns.\n"
-        f"- Exactly {turns} turns: {turns // 2} from user, {turns // 2} from Aiko, alternating.\n"
-        "- The first turn is user. The last turn is Aiko."
+        f"- Exactly {turns} turns total: {turns // 2} from user, {turns // 2} from Aiko, alternating, "
+        "user first, Aiko last.\n"
+        "- Each Aiko turn follows this SHAPE (only the shape -- not the wording, this is a placeholder):\n"
+        f"{skeleton}\n"
+        f"- Before you finish, silently count the turns you wrote: there must be exactly {turns}, no more, "
+        "no less. If you are short, keep going until you reach it."
     )
 
 
@@ -501,7 +508,7 @@ def build_prompt(leaf: dict, tone_cat: dict, bundle: dict, ending_cat: dict, axe
         _topic_section(leaf),
         _edge_section(axes),
         _ending_section(ending_cat),
-        _output_format_section(axes["turns"]),
+        _output_format_section(axes["turns"], axes["lengths"]["aiko"]["ideal_lines"]),
     ]
     return "\n\n".join(s for s in sections if s)
 

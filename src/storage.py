@@ -116,7 +116,7 @@ def save_flagged(items: list[tuple[str, list[str]]]) -> Path:
     flagged_dir = Path("data/flagged")
     flagged_dir.mkdir(parents=True, exist_ok=True)
     now = datetime.now(timezone.utc)
-    path = flagged_dir / f"flagged_{now.strftime('%Y%m%d_%H%M%S')}{_slot_suffix()}.jsonl"
+    path = flagged_dir / f"flagged_{now.strftime('%Y%m%d_%H%M%S')}.jsonl"
     with path.open("w", encoding="utf-8") as f:
         for conv, flags in items:
             f.write(json.dumps({"conversation": conv, "flags": flags}, ensure_ascii=False) + "\n")

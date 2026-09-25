@@ -176,6 +176,14 @@ def process(text: str) -> dict:
     if not turns:
         return bad("invalid_format")
     n = len(turns)
+
+    # A trailing incomplete turn (model added one more "user:" with no Aiko
+    # reply after it) is common and recoverable -- trim it instead of
+    # throwing the whole conversation away.
+    if n % 2 and turns[-1][0] == "user":
+        turns = turns[:-1]
+        n -= 1
+
     if n < MIN_TURNS:
         return bad("too_few_turns(%d)" % n)
     if n > MAX_TURNS:
