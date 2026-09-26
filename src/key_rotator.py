@@ -9,6 +9,10 @@ If SLOT_ID is set (1-based), only that slot's block of KEYS_PER_SLOT keys
 is loaded -- e.g. SLOT_ID=1 -> keys 1-5, SLOT_ID=2 -> keys 6-10, ...
 SLOT_ID=6 -> keys 26-30. Without SLOT_ID, every GEMINI_KEY_* found in the
 environment is loaded (useful for local/manual test runs).
+
+wait_for_available_key() sleeps in 5-second chunks and honours both a
+hard deadline and a stop_check callback, so a run never overshoots
+GitHub's timeout by sleeping through a long cooldown.
 """
 from __future__ import annotations
 
@@ -17,7 +21,7 @@ import os
 import time
 from dataclasses import dataclass
 from threading import Lock
-from typing import Optional
+from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -90,18 +94,55 @@ class KeyRotator:
         with self._lock:
             return all(s.dead for s in self._states.values())
 
-    def wait_for_available_key(self, max_wait_seconds: int = 300) -> Optional[str]:
-        """Block until a key frees up, or return None after all keys are dead."""
-        waited = 0
+    def wait_for_available_key(
+        self,
+        max_wait_seconds: int = 300,
+        deadline: Optional[float] = None,
+        stop_check: Optional[Callable[[], bool]] = None,
+    ) -> Optional[str]:
+        """Block until a key frees up, or return None if:
+          - every key is dead, or
+          - the hard deadline passes, or
+          - stop_check() returns True (e.g. shutdown signal), or
+          - max_wait_seconds is exhausted.
+
+        Sleeps in short chunks so deadline and stop conditions are honoured
+        with ~5-second granularity instead of a full cooldown cycle.
+        """
+        chunk = 5.0
+        waited = 0.0
+
         while waited < max_wait_seconds:
             if self.all_dead():
                 return None
+            if deadline is not None and time.monotonic() >= deadline:
+                return None
+            if stop_check is not None and stop_check():
+                return None
+
             key = self.get_next_key()
             if key:
                 return key
-            logger.warning("All keys cooling down, sleeping %ds", ALL_COOLING_SLEEP_SECONDS)
-            time.sleep(ALL_COOLING_SLEEP_SECONDS)
-            waited += ALL_COOLING_SLEEP_SECONDS
+
+            remaining_budget = max_wait_seconds - waited
+            if deadline is not None:
+                remaining_deadline = deadline - time.monotonic()
+                if remaining_deadline <= 0:
+                    return None
+                remaining_budget = min(remaining_budget, remaining_deadline)
+
+            sleep_for = min(chunk, ALL_COOLING_SLEEP_SECONDS, remaining_budget)
+            if sleep_for <= 0:
+                return None
+
+            if waited == 0:
+                logger.warning(
+                    "All keys cooling down, sleeping in chunks up to %ds", max_wait_seconds
+                )
+
+            time.sleep(sleep_for)
+            waited += sleep_for
+
         return None
 
     def mark_rate_limited(self, key: str, cooldown: int = RATE_LIMIT_COOLDOWN_SECONDS) -> None:

@@ -1,12 +1,19 @@
 # src/main.py
 """
 Orchestrator: one invocation = one GitHub Actions run.
-Graceful shutdown at 58 min (before GitHub's 63 min hard timeout).
+
+Timing budget (never tweak casually):
+  RUN_DEADLINE_SECONDS = 52 min   -> graceful shutdown begins
+  GitHub timeout       = 58 min   -> hard kill (safety net)
+  Lock TTL             = 75 min   -> orphan recovery
+  Cron                 = hourly   -> next dispatch at :02
 
 Flow (v2):
   - generate_one() returns a ChatML record ready for upload (no plain text)
   - dedup bookkeeping (hash/signature/opening) happens inside generate_one
   - storage handles both dict records and legacy str conversations
+  - All sleeps are interruptible: shutdown signal or deadline is honoured
+    within ~5 seconds, so a 5xx retry storm can never overshoot the window.
 """
 from __future__ import annotations
 
@@ -63,7 +70,7 @@ def _env_int(name, default):
 LOOP_ITERATIONS = _env_int("BATCH_SIZE", 100)
 BATCH_UPLOAD_THRESHOLD = 15
 DAILY_TARGET = _env_int("DAILY_TARGET", 6700)
-RUN_DEADLINE_SECONDS = 58 * 60
+RUN_DEADLINE_SECONDS = 52 * 60
 TONE_HISTORY_SIZE = 25
 RATE_LIMIT_COOLDOWN_SECONDS = 90
 
@@ -75,6 +82,25 @@ def _signal_handler(signum, frame):
     global _shutdown_requested
     _shutdown_requested = True
     logger.warning("Shutdown signal %s received; will stop after current iteration", signum)
+
+
+def _interruptible_sleep(seconds: float, deadline: float | None = None, chunk: float = 5.0) -> bool:
+    """Sleep in small chunks so signals and the hard deadline are honoured.
+
+    Returns True if the full duration was slept, False if interrupted
+    (shutdown requested or deadline reached). Worst-case delay between
+    interrupt and return is ~chunk seconds (default 5s).
+    """
+    end = time.monotonic() + max(0.0, seconds)
+    while True:
+        if _shutdown_requested:
+            return False
+        if deadline is not None and time.monotonic() >= deadline:
+            return False
+        now = time.monotonic()
+        if now >= end:
+            return True
+        time.sleep(min(chunk, end - now))
 
 
 # ─────────────────────────────────────────────────────────
@@ -204,8 +230,17 @@ def _call_with_key_rotation(
         if _shutdown_requested:
             return None
 
-        key = key_rotator.wait_for_available_key()
+        key = key_rotator.wait_for_available_key(
+            deadline=deadline,
+            stop_check=lambda: _shutdown_requested,
+        )
         if key is None:
+            # Could mean: all keys dead, deadline reached, or shutdown.
+            # Do NOT send a critical alert if we're just winding down.
+            if _shutdown_requested or (
+                deadline is not None and time.monotonic() >= deadline
+            ):
+                return None
             logger.critical("All Gemini keys dead")
             notifier.send_critical_alert(
                 "All keys dead",
@@ -243,7 +278,12 @@ def _call_with_key_rotation(
                         "Gemini %d on %s. Retry %d/2 in %ds.",
                         status, model, server_error_retries, wait_seconds,
                     )
-                    time.sleep(wait_seconds)
+                    if not _interruptible_sleep(wait_seconds, deadline=deadline):
+                        logger.warning(
+                            "Interrupted during %d retry sleep (shutdown or deadline); bailing out",
+                            status,
+                        )
+                        return None
                     continue
                 if model == PRIMARY_MODEL:
                     model = FALLBACK_MODEL
