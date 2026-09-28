@@ -2,17 +2,26 @@
 """
 Key rotation for Gemini API keys.
 
-Handles round-robin key selection, rate-limit cooldowns, and dead-key
-tracking so a single exhausted or invalid key never blocks generation.
+Handles round-robin key selection, rate-limit cooldowns, dead-key
+tracking, and a per-slot circuit breaker for server-side outages.
 
 If SLOT_ID is set (1-based), only that slot's block of KEYS_PER_SLOT keys
-is loaded -- e.g. SLOT_ID=1 -> keys 1-5, SLOT_ID=2 -> keys 6-10, ...
-SLOT_ID=6 -> keys 26-30. Without SLOT_ID, every GEMINI_KEY_* found in the
+is loaded -- e.g. SLOT_ID=1 -> keys 1-6, SLOT_ID=2 -> keys 7-12, ...
+SLOT_ID=6 -> keys 31-36. Without SLOT_ID, every GEMINI_KEY_* found in the
 environment is loaded (useful for local/manual test runs).
 
-wait_for_available_key() sleeps in 5-second chunks and honours both a
-hard deadline and a stop_check callback, so a run never overshoots
-GitHub's timeout by sleeping through a long cooldown.
+CIRCUIT BREAKER
+----------------
+When every key in this slot has returned a 5xx (500/503) at least once
+SINCE the last successful call, the circuit opens. While open:
+  - get_next_key() and wait_for_available_key() refuse to return any key
+  - the caller (main._call_with_key_rotation) bails out with reason
+    "server_side_down" so the slot shuts down gracefully without
+    hammering the API further.
+
+A single success resets the whole wave: the circuit closes and every key
+is available again. Short server blips are tolerated; only a sustained
+outage trips the breaker.
 """
 from __future__ import annotations
 
@@ -37,10 +46,11 @@ class KeyState:
     cooldown_until: float = 0.0
     dead: bool = False
     requests_made: int = 0
+    server_error_seen: bool = False
 
 
 class KeyRotator:
-    """Round-robin rotator over GEMINI_KEY_1..GEMINI_KEY_36 (or one slot of 5)."""
+    """Round-robin rotator over GEMINI_KEY_1..GEMINI_KEY_36 (or one slot of 6)."""
 
     def __init__(self, keys: Optional[list[str]] = None) -> None:
         if keys is None:
@@ -51,6 +61,9 @@ class KeyRotator:
         self._order: list[str] = list(keys)
         self._cursor = 0
         self._lock = Lock()
+        # Circuit breaker state
+        self._server_error_keys: set[str] = set()
+        self._circuit_open = False
 
     @staticmethod
     def _load_keys_from_env() -> list[str]:
@@ -74,8 +87,23 @@ class KeyRotator:
                 logger.warning("GEMINI_KEY_%d not set", i)
         return keys
 
+    def total_keys(self) -> int:
+        return len(self._order)
+
+    def server_error_count(self) -> int:
+        with self._lock:
+            return len(self._server_error_keys)
+
+    def is_circuit_open(self) -> bool:
+        with self._lock:
+            return self._circuit_open
+
     def get_next_key(self) -> Optional[str]:
-        """Return the next usable key, or None if all keys are cooling/dead."""
+        """Return the next usable key, or None if none is currently usable.
+
+        A key is skipped if it is dead, cooling down, or has already
+        returned a 5xx since the last success (server-error wave).
+        """
         with self._lock:
             now = time.time()
             n = len(self._order)
@@ -86,6 +114,8 @@ class KeyRotator:
                 if state.dead:
                     continue
                 if state.cooldown_until > now:
+                    continue
+                if key in self._server_error_keys:
                     continue
                 return key
             return None
@@ -102,18 +132,21 @@ class KeyRotator:
     ) -> Optional[str]:
         """Block until a key frees up, or return None if:
           - every key is dead, or
+          - the circuit breaker has opened, or
           - the hard deadline passes, or
           - stop_check() returns True (e.g. shutdown signal), or
           - max_wait_seconds is exhausted.
 
-        Sleeps in short chunks so deadline and stop conditions are honoured
-        with ~5-second granularity instead of a full cooldown cycle.
+        Sleeps in short chunks so deadline, circuit state, and stop
+        conditions are honoured with ~5-second granularity.
         """
         chunk = 5.0
         waited = 0.0
 
         while waited < max_wait_seconds:
             if self.all_dead():
+                return None
+            if self.is_circuit_open():
                 return None
             if deadline is not None and time.monotonic() >= deadline:
                 return None
@@ -157,10 +190,36 @@ class KeyRotator:
                 self._states[key].dead = True
                 logger.error("Key %s marked DEAD", self._mask(key))
 
+    def mark_server_error(self, key: str) -> None:
+        """Record a 5xx response from this key. When every key in the slot
+        has reported a 5xx since the last success, open the circuit."""
+        with self._lock:
+            if key not in self._states:
+                return
+            self._states[key].server_error_seen = True
+            self._server_error_keys.add(key)
+            if len(self._server_error_keys) >= len(self._order):
+                if not self._circuit_open:
+                    self._circuit_open = True
+                    logger.critical(
+                        "Circuit breaker OPEN — all %d keys returned 5xx",
+                        len(self._order),
+                    )
+
     def mark_success(self, key: str) -> None:
         with self._lock:
             if key in self._states:
                 self._states[key].requests_made += 1
+            # A success closes the circuit and clears the wave.
+            if self._server_error_keys or self._circuit_open:
+                logger.info(
+                    "Success on %s — resetting server-error wave (was %d keys)",
+                    self._mask(key), len(self._server_error_keys),
+                )
+                self._server_error_keys.clear()
+                self._circuit_open = False
+            for s in self._states.values():
+                s.server_error_seen = False
 
     def stats(self) -> dict:
         with self._lock:
@@ -169,6 +228,7 @@ class KeyRotator:
                     "dead": s.dead,
                     "cooldown_until": s.cooldown_until,
                     "requests_made": s.requests_made,
+                    "server_error_seen": s.server_error_seen,
                 }
                 for k, s in self._states.items()
             }
