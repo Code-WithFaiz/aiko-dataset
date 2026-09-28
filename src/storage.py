@@ -9,7 +9,8 @@ Records may be:
   - dict  (ChatML record: {"messages": [...]})
   - str   (raw conversation text; wrapped as {"conversation": ...} for back-compat)
 
-A local copy under data/batches/ is always kept regardless of upload outcome.
+A local copy under data/batches/ is kept for debugging during the run
+only (ephemeral on GitHub Actions).
 """
 from __future__ import annotations
 
@@ -102,7 +103,7 @@ def upload_batch(records: list, tag_prefix: str = "batch") -> tuple[bool, str]:
     tag_prefix="flagged" -> tag = flagged-conversations (single, forever)
 
     Records may be dict (ChatML) or str (raw). Both are accepted.
-    Returns (uploaded_ok, release_url_or_empty). Local copy is always kept.
+    Returns (uploaded_ok, release_url_or_empty).
     """
     now = datetime.now(timezone.utc)
     filename = f"{tag_prefix}_{now.strftime('%Y%m%d_%H%M%S')}{_slot_suffix()}.jsonl"
@@ -138,21 +139,3 @@ def upload_batch(records: list, tag_prefix: str = "batch") -> tuple[bool, str]:
     except (requests.RequestException, OSError) as exc:
         logger.error("Exception uploading batch asset: %s", exc)
         return False, ""
-
-
-def save_flagged(items: list[tuple]) -> Path:
-    """Local-only bucket for flagged conversations. Never uploaded to GitHub."""
-    flagged_dir = Path("data/flagged")
-    flagged_dir.mkdir(parents=True, exist_ok=True)
-    now = datetime.now(timezone.utc)
-    path = flagged_dir / f"flagged_{now.strftime('%Y%m%d_%H%M%S')}.jsonl"
-    with path.open("w", encoding="utf-8") as f:
-        for rec, flags in items:
-            line = {"flags": flags}
-            if isinstance(rec, dict):
-                line["record"] = rec
-            else:
-                line["conversation"] = rec
-            f.write(json.dumps(line, ensure_ascii=False) + "\n")
-    logger.info("Saved %d flagged conversations locally to %s", len(items), path)
-    return path

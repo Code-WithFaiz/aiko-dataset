@@ -29,6 +29,9 @@ from src import db
 
 logger = logging.getLogger(__name__)
 
+# Must match key_rotator.MAX_KEY_INDEX. Kept local to avoid coupling.
+_MAX_KEY_INDEX = 36
+
 
 def _key_id(key: str) -> str:
     """Same hash used by main.py -- deterministic mapping key -> key_stats._id."""
@@ -50,7 +53,7 @@ def _build_key_health() -> dict:
 
     working, dead, cooling, unknown = [], [], [], []
 
-    for i in range(1, 51):
+    for i in range(1, _MAX_KEY_INDEX + 1):
         key = os.getenv(f"GEMINI_KEY_{i}")
         if not key:
             continue
@@ -106,7 +109,7 @@ def _build_stats_from_db() -> dict:
             cnt = doc.get("count", 0) or 0
             tag = doc.get("tag_prefix", "batch") or "batch"
             if tag not in total_by_tag:
-                tag = "batch"  # unknown tag -> treat as batch
+                tag = "batch"
 
             total_batches += 1
             total_by_tag[tag] += cnt

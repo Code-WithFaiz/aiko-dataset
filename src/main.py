@@ -8,14 +8,15 @@ Timing budget (never tweak casually):
   Lock TTL             = 75 min   -> orphan recovery
   Cron                 = hourly   -> next dispatch at :02
 
-Circuit breaker:
-  - per-slot, in KeyRotator
+Circuit breaker (in KeyRotator):
+  - per-slot
   - opens when all keys return 5xx since last success
   - closes on any success
-  - while open, _call_with_key_rotation returns reason "server_side_down"
-    and the slot exits gracefully (flushes batches, releases lock)
-  - 5xx retry sleep is a flat 15s, so an outage is detected in ~1 min
-    instead of ~5 min with the old 60/90 schedule
+  - while open, this module returns reason "server_side_down" and the
+    slot exits gracefully (flushes pending batches, releases lock)
+
+Sleeps are interruptible: shutdown signal or deadline is honoured
+within ~5 seconds, so a 5xx retry storm never overshoots the window.
 """
 from __future__ import annotations
 
@@ -76,15 +77,11 @@ RUN_DEADLINE_SECONDS = 52 * 60
 TONE_HISTORY_SIZE = 25
 RATE_LIMIT_COOLDOWN_SECONDS = 90
 
-# Flat sleep between consecutive 5xx retries. Short enough to detect a
-# sustained outage in ~1 minute; long enough not to hammer the API.
+# Flat sleep between consecutive 5xx retries.
 SERVER_5XX_SLEEP_SECONDS = 15
-
-# How many consecutive 5xx on a single model before we either switch to
-# the fallback model (primary) or give up on this prompt (fallback).
+# Model fallback after this many consecutive 5xx on the primary.
 MAX_CONSECUTIVE_5XX = 3
 
-# --- Signal handling for graceful shutdown on GitHub cancel ---
 _shutdown_requested = False
 
 
@@ -95,12 +92,8 @@ def _signal_handler(signum, frame):
 
 
 def _interruptible_sleep(seconds: float, deadline: float | None = None, chunk: float = 5.0) -> bool:
-    """Sleep in small chunks so signals and the hard deadline are honoured.
-
-    Returns True if the full duration was slept, False if interrupted
-    (shutdown requested or deadline reached). Worst-case delay between
-    interrupt and return is ~chunk seconds (default 5s).
-    """
+    """Sleep in small chunks so signals and deadline are honoured.
+    Returns True if fully slept, False if interrupted."""
     end = time.monotonic() + max(0.0, seconds)
     while True:
         if _shutdown_requested:
@@ -148,11 +141,7 @@ def generate_one(
     recent_tone_cats: list[str],
     deadline: float | None = None,
 ) -> tuple[dict | None, str, list[str]]:
-    """Returns (chatml_record_or_None, reason, flags).
-
-    On success, the returned dict is a ready-to-upload ChatML record.
-    Dedup bookkeeping (hash / signature / opening) is done right here.
-    """
+    """Returns (chatml_record_or_None, reason, flags)."""
     recent_signatures = db.get_recent_signatures()
     recent_openings = db.get_recent_openings()
     category_map = load_category_map()
@@ -161,45 +150,29 @@ def generate_one(
         if deadline is not None and time.monotonic() >= deadline:
             return None, "deadline_reached", []
 
-        # 1. Axes
         axes = pick_axes(leaf, recent_tone_cats)
-
-        # 2. Tone category
         tone_cat = pick_tone_category(recent_tone_cats, allowed=axes["allowed_categories"])
         cat_name = tone_cat["category"]
-
-        # 3. Conversation type
         conv_type = category_map.get(cat_name, "playful-banter")
-
-        # 4. Variety bundle
         bundle = pick_variety_bundle(conv_type)
-
-        # 5. Ending category
-        ending_cat = pick_ending_category(
-            conv_type, bundle["env"].get("ending_lean", [])
-        )
-
-        # 6. Prompt
+        ending_cat = pick_ending_category(conv_type, bundle["env"].get("ending_lean", []))
         prompt = build_prompt(leaf, tone_cat, bundle, ending_cat, axes)
 
-        # 7. Gemini
         text, call_reason = _call_with_key_rotation(key_rotator, prompt, deadline=deadline)
         if text is None:
-            # Bail out immediately on any non-retriable reason.
             if call_reason in (
                 "server_side_down",
                 "shutdown",
                 "deadline_reached",
                 "interrupted",
                 "all_keys_dead",
+                "all_keys_cooling",
             ):
                 return None, call_reason, []
-            # Retriable (unknown_error, retries_exhausted) — allow another attempt.
             if attempt == 3:
                 return None, f"call_failed:{call_reason}", []
             continue
 
-        # 8. Validate + safe-fix
         conversation = parse_conversation(text)
         result = validator.process(conversation)
         if not result["ok"]:
@@ -210,14 +183,12 @@ def generate_one(
         conversation = result["text"]
         flags = result["flags"]
 
-        # 9. Dedup
         is_dup, dup_reason = dedup.is_duplicate(
             conversation, db.hash_exists, recent_signatures, recent_openings
         )
         if is_dup:
             logger.warning("Dedup reject (attempt %d): %s", attempt, dup_reason)
             if attempt == 3:
-                # Accept as last resort — still record + convert.
                 record = converter.to_record(result["turns"])
                 db.add_hash(dedup.hash_text(conversation))
                 db.add_signature(dedup.signature(conversation))
@@ -226,7 +197,6 @@ def generate_one(
                 return record, "accepted_after_dedup_retries_exhausted", flags
             continue
 
-        # 10. Success — convert to ChatML + record bookkeeping, both here.
         record = converter.to_record(result["turns"])
         db.add_hash(dedup.hash_text(conversation))
         db.add_signature(dedup.signature(conversation))
@@ -246,20 +216,20 @@ def _call_with_key_rotation(
     """Return (text_or_None, reason).
 
     Reasons:
-      "ok"                 — success, text is the raw response
-      "server_side_down"   — circuit opened (all keys 5xx'd); server issue
-      "shutdown"           — shutdown signal received
-      "deadline_reached"   — deadline hit
-      "all_keys_dead"      — every key 401/403'd
-      "retries_exhausted"  — both models gave up after repeated 5xx
-      "interrupted"        — interruptible_sleep bailed during a 5xx wait
-      "unknown_error"      — some other Gemini error
+      "ok"                 success
+      "server_side_down"   circuit opened (all keys 5xx'd)
+      "shutdown"           shutdown signal received
+      "deadline_reached"   deadline hit
+      "all_keys_dead"      every key 401/403'd
+      "all_keys_cooling"   all keys rate-limited longer than wait window
+      "retries_exhausted"  both models gave up on repeated 5xx
+      "interrupted"        interruptible_sleep bailed during a 5xx wait
+      "unknown_error"      some other Gemini error
     """
     model = PRIMARY_MODEL
     consecutive_5xx = 0
 
     while True:
-        # Circuit breaker: cheapest check, always first.
         if key_rotator.is_circuit_open():
             return None, "server_side_down"
         if deadline is not None and time.monotonic() >= deadline:
@@ -272,19 +242,21 @@ def _call_with_key_rotation(
             stop_check=lambda: _shutdown_requested,
         )
         if key is None:
-            # Distinguish why: circuit, shutdown, deadline, or truly dead.
             if key_rotator.is_circuit_open():
                 return None, "server_side_down"
             if _shutdown_requested:
                 return None, "shutdown"
             if deadline is not None and time.monotonic() >= deadline:
                 return None, "deadline_reached"
-            logger.critical("All Gemini keys dead")
-            notifier.send_critical_alert(
-                "All keys dead",
-                "Every Gemini API key is dead. Manual intervention needed.",
-            )
-            return None, "all_keys_dead"
+            if key_rotator.all_dead():
+                logger.critical("All Gemini keys dead")
+                notifier.send_critical_alert(
+                    "All keys dead",
+                    "Every Gemini API key is dead. Manual intervention needed.",
+                )
+                return None, "all_keys_dead"
+            logger.warning("Keys still cooling after wait window; bailing out for this prompt")
+            return None, "all_keys_cooling"
 
         try:
             text = call_gemini(prompt, key, model=model)
@@ -310,43 +282,36 @@ def _call_with_key_rotation(
 
             if status in (500, 503):
                 key_rotator.mark_server_error(key)
-                keys_5xx = key_rotator.server_error_count()
-                total_keys = key_rotator.total_keys()
-
-                # Circuit check right after marking — server down?
                 if key_rotator.is_circuit_open():
                     logger.critical(
-                        "Circuit breaker triggered: %d/%d keys returned 5xx. "
-                        "Server side issue — bailing out.",
-                        keys_5xx, total_keys,
+                        "Circuit breaker triggered: %d/%d keys returned 5xx",
+                        key_rotator.server_error_count(),
+                        key_rotator.total_keys(),
                     )
                     return None, "server_side_down"
 
                 consecutive_5xx += 1
-
-                # Model fallback after enough consecutive 5xx on primary.
                 if consecutive_5xx >= MAX_CONSECUTIVE_5XX:
                     if model == PRIMARY_MODEL:
                         model = FALLBACK_MODEL
                         consecutive_5xx = 0
                         logger.info("Switching to FALLBACK_MODEL: %s", model)
                         continue
-                    else:
-                        logger.warning(
-                            "Fallback model also %d consecutive 5xx — giving up on this prompt",
-                            consecutive_5xx,
-                        )
-                        return None, "retries_exhausted"
+                    logger.warning(
+                        "Fallback model also %d consecutive 5xx; giving up on this prompt",
+                        consecutive_5xx,
+                    )
+                    return None, "retries_exhausted"
 
                 logger.warning(
                     "Gemini %d on %s (%d/%d keys 5xx, attempt %d). Retry in %ds.",
-                    status, model, keys_5xx, total_keys,
+                    status, model,
+                    key_rotator.server_error_count(), key_rotator.total_keys(),
                     consecutive_5xx, SERVER_5XX_SLEEP_SECONDS,
                 )
                 if not _interruptible_sleep(SERVER_5XX_SLEEP_SECONDS, deadline=deadline):
                     logger.warning(
-                        "Interrupted during %d retry sleep (shutdown or deadline); bailing out",
-                        status,
+                        "Interrupted during %d retry sleep (shutdown or deadline)", status
                     )
                     return None, "interrupted"
                 continue
@@ -401,6 +366,8 @@ def _run_locked() -> int:
     flagged_batch: list[tuple[dict, list[str]]] = []
     generated = 0
     rejected = 0
+    clean_upload_failures = 0
+    flagged_upload_failures = 0
     recent_tone_cats: list[str] = []
     run_start = time.monotonic()
     deadline = run_start + RUN_DEADLINE_SECONDS
@@ -416,10 +383,9 @@ def _run_locked() -> int:
             graceful_shutdown = True
             break
 
-        # Circuit may have opened in a previous iteration.
         if key_rotator.is_circuit_open():
             logger.critical(
-                "Circuit breaker is OPEN — server side outage. "
+                "Circuit breaker OPEN — server side outage. "
                 "Flushing %d clean + %d flagged and exiting gracefully.",
                 len(batch), len(flagged_batch),
             )
@@ -454,18 +420,13 @@ def _run_locked() -> int:
         if record is None:
             rejected += 1
             if reason in ("server_side_down", "all_keys_dead"):
-                logger.critical(
-                    "=== %s: server side issue, gracefully shutting down slot ===",
-                    reason,
-                )
-                if key_rotator.is_circuit_open():
-                    logger.critical(
-                        "All %d keys in this slot returned 5xx — Gemini appears down.",
-                        key_rotator.total_keys(),
-                    )
+                logger.critical("=== %s: shutting down slot gracefully ===", reason)
                 server_side_down = True
                 graceful_shutdown = True
                 break
+            if reason == "all_keys_cooling":
+                logger.warning("All keys cooling this prompt; trying next prompt")
+                continue
             if reason in ("deadline_reached", "shutdown"):
                 logger.info(
                     "Graceful shutdown inside generate_one (%s). Flushing %d batched conversations.",
@@ -483,37 +444,40 @@ def _run_locked() -> int:
         generated += 1
 
         if len(batch) >= BATCH_UPLOAD_THRESHOLD:
-            _flush_batch(batch, tag_prefix="batch")
+            if not _flush_batch(batch, tag_prefix="batch"):
+                clean_upload_failures += 1
             batch = []
         if len(flagged_batch) >= BATCH_UPLOAD_THRESHOLD:
-            _flush_batch([c for c, _ in flagged_batch], tag_prefix="flagged")
+            if not _flush_batch([c for c, _ in flagged_batch], tag_prefix="flagged"):
+                flagged_upload_failures += 1
             flagged_batch = []
 
     if batch:
-        _flush_batch(batch, tag_prefix="batch")
+        if not _flush_batch(batch, tag_prefix="batch"):
+            clean_upload_failures += 1
     if flagged_batch:
-        _flush_batch([c for c, _ in flagged_batch], tag_prefix="flagged")
+        if not _flush_batch([c for c, _ in flagged_batch], tag_prefix="flagged"):
+            flagged_upload_failures += 1
 
     db.record_generated(generated, rejected)
 
+    status = "complete"
     if server_side_down:
-        logger.critical(
-            "Run complete: generated=%d rejected=%d — SERVER SIDE OUTAGE, gracefully shutdown",
-            generated, rejected,
-        )
-    else:
-        logger.info(
-            "Run complete: generated=%d rejected=%d%s",
-            generated, rejected,
-            " [graceful_shutdown]" if graceful_shutdown else "",
-        )
+        status = "SERVER_SIDE_DOWN"
+    elif graceful_shutdown:
+        status = "graceful_shutdown"
+
+    logger.info(
+        "Run %s: generated=%d rejected=%d upload_failures(clean=%d flagged=%d)",
+        status, generated, rejected, clean_upload_failures, flagged_upload_failures,
+    )
 
     _maybe_send_daily_report()
     return 0
 
 
-def _flush_batch(batch: list[dict], tag_prefix: str = "batch") -> None:
-    """Upload one batch and log it. tag_prefix='batch' for clean, 'flagged' for review."""
+def _flush_batch(batch: list[dict], tag_prefix: str = "batch") -> bool:
+    """Upload one batch and log it. Returns True on success."""
     ok, url = storage.upload_batch(batch, tag_prefix=tag_prefix)
     slot = os.getenv("SLOT_ID", "0")
     batch_id = f"{tag_prefix}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_s{slot}"
@@ -521,7 +485,11 @@ def _flush_batch(batch: list[dict], tag_prefix: str = "batch") -> None:
         db.log_batch(batch_id, url, len(batch), tag_prefix=tag_prefix)
         logger.info("Uploaded %s batch of %d conversations to %s", tag_prefix, len(batch), url)
     else:
-        logger.error("%s batch upload failed; %d conversations kept locally only", tag_prefix, len(batch))
+        logger.error(
+            "CRITICAL: %s batch upload failed; %d conversations lost (ephemeral runner)",
+            tag_prefix, len(batch),
+        )
+    return ok
 
 
 def _maybe_send_daily_report() -> None:

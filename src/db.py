@@ -11,15 +11,15 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from pymongo import ASCENDING, MongoClient, ReturnDocument, UpdateOne
+from pymongo import ASCENDING, MongoClient, UpdateOne
 from pymongo.collection import Collection
 from pymongo.database import Database
 from pymongo.errors import PyMongoError
-import random
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +30,6 @@ _db: Optional[Database] = None
 RUN_LOCK_SLOTS = ["1", "2", "3", "4", "5", "6"]
 RUN_LOCK_TTL_SECONDS = 75 * 60
 SIGNATURE_BUFFER_CAP = 5000
-SCENARIO_BUFFER_CAP = 50
-OPENER_BUFFER_CAP = 200
 OPENING_BUFFER_CAP = 500
 SEEN_HASH_TTL_DAYS = 90
 
@@ -61,13 +59,12 @@ def _ensure_indexes(db: Database) -> None:
         db.seen_hashes.create_index("created_at", expireAfterSeconds=SEEN_HASH_TTL_DAYS * 86400)
     except PyMongoError as e:
         logger.warning("Could not create seen_hashes.created_at TTL index: %s", e)
-    # Note: _id is already unique by default, no explicit index needed.
 
 
 # ---------- Run lock (concurrency safety) ----------
 
 def acquire_run_lock() -> Optional[str]:
-    """Try any of the 5 slots. Returns lock_id if acquired, else None."""
+    """Try any of the RUN_LOCK_SLOTS. Returns lock_id if acquired, else None."""
     db = get_db()
     run_id = uuid.uuid4().hex
     now = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -203,12 +200,7 @@ def init_leaf_quotas(leaves: list[dict]) -> None:
 
 
 def get_next_leaf_path(ordered_paths: list[str]) -> Optional[str]:
-    """First leaf (in shuffled order) whose generated < quota.
-
-    Only fetches unfilled leaves from Mongo, then walks the shuffled
-    order to find the earliest one. Much faster than fetching all
-    leaf_state docs on every call.
-    """
+    """First leaf (in shuffled order) whose generated < quota."""
     db = get_db()
     cursor = db.leaf_state.find(
         {"$expr": {"$lt": ["$generated", "$quota"]}},
@@ -286,42 +278,6 @@ def _trim_collection(coll: Collection, sort_field: str, cap: int) -> None:
         coll.delete_many({"_id": {"$in": ids}})
 
 
-# ---------- Scenario / opener rolling buffers ----------
-
-def get_recent_scenarios(limit: int = SCENARIO_BUFFER_CAP) -> list[str]:
-    db = get_db()
-    cursor = db.recent_scenarios.find().sort("used_at", -1).limit(limit)
-    return [d["scenario_id"] for d in cursor]
-
-
-def add_used_scenarios(scenario_ids: list[str]) -> None:
-    db = get_db()
-    now = datetime.now(timezone.utc)
-    if scenario_ids:
-        db.recent_scenarios.insert_many([{"scenario_id": s, "used_at": now} for s in scenario_ids])
-    _trim_collection(db.recent_scenarios, "used_at", SCENARIO_BUFFER_CAP)
-
-
-def get_recent_openers(category: str, limit: int = OPENER_BUFFER_CAP) -> list[str]:
-    db = get_db()
-    cursor = db.recent_openers.find({"category": category}).sort("used_at", -1).limit(limit)
-    return [d["opener_id"] for d in cursor]
-
-
-def add_used_opener(category: str, opener_id: str) -> None:
-    db = get_db()
-    db.recent_openers.insert_one(
-        {"category": category, "opener_id": opener_id, "used_at": datetime.now(timezone.utc)}
-    )
-    count = db.recent_openers.count_documents({"category": category})
-    if count > OPENER_BUFFER_CAP:
-        excess = count - OPENER_BUFFER_CAP
-        old = list(db.recent_openers.find({"category": category}).sort("used_at", ASCENDING).limit(excess))
-        ids = [d["_id"] for d in old]
-        if ids:
-            db.recent_openers.delete_many({"_id": {"$in": ids}})
-
-
 # ---------- Key stats ----------
 
 def update_key_stats(key_id: str, **fields) -> None:
@@ -341,8 +297,7 @@ def increment_key_requests(key_id: str) -> None:
 # ---------- Batch log ----------
 
 def log_batch(batch_id: str, release_url: str, count: int, tag_prefix: str = "batch") -> None:
-    """Log a completed upload. tag_prefix distinguishes clean vs flagged batches
-    so the notifier can report them separately."""
+    """Log a completed upload. tag_prefix distinguishes clean vs flagged."""
     db = get_db()
     db.batch_log.insert_one(
         {
