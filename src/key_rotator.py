@@ -27,8 +27,8 @@ logger = logging.getLogger(__name__)
 
 RATE_LIMIT_COOLDOWN_SECONDS = 90
 ALL_COOLING_SLEEP_SECONDS = 60
-KEYS_PER_SLOT = 5
-MAX_KEY_INDEX = 30
+KEYS_PER_SLOT = 6
+MAX_KEY_INDEX = 36
 
 
 @dataclass
@@ -40,7 +40,7 @@ class KeyState:
 
 
 class KeyRotator:
-    """Round-robin rotator over GEMINI_KEY_1..GEMINI_KEY_30 (or one slot of 5)."""
+    """Round-robin rotator over GEMINI_KEY_1..GEMINI_KEY_36 (or one slot of 5)."""
 
     def __init__(self, keys: Optional[list[str]] = None) -> None:
         if keys is None:

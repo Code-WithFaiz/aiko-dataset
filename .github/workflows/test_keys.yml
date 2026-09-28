@@ -45,4 +45,10 @@ jobs:
           GEMINI_KEY_28: ${{ secrets.GEMINI_KEY_28 }}
           GEMINI_KEY_29: ${{ secrets.GEMINI_KEY_29 }}
           GEMINI_KEY_30: ${{ secrets.GEMINI_KEY_30 }}
+          GEMINI_KEY_31: ${{ secrets.GEMINI_KEY_31 }}
+          GEMINI_KEY_32: ${{ secrets.GEMINI_KEY_32 }}
+          GEMINI_KEY_33: ${{ secrets.GEMINI_KEY_33 }}
+          GEMINI_KEY_34: ${{ secrets.GEMINI_KEY_34 }}
+          GEMINI_KEY_35: ${{ secrets.GEMINI_KEY_35 }}
+          GEMINI_KEY_36: ${{ secrets.GEMINI_KEY_36 }}
         run: python scripts/test_keys.py
