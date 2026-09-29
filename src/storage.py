@@ -70,12 +70,9 @@ def write_local_batch(records: list, filename: str) -> Path:
 
 def _get_or_create_release(tag: str) -> dict | None:
     repo = _repo()
+    url = f"{GITHUB_API}/repos/{repo}/releases/tags/{tag}"
     try:
-        r = requests.get(
-            f"{GITHUB_API}/repos/{repo}/releases/tags/{tag}",
-            headers=_headers(),
-            timeout=30,
-        )
+        r = requests.get(url, headers=_headers(), timeout=30)
         if r.status_code == 200:
             return r.json()
         if r.status_code == 404:
@@ -87,6 +84,10 @@ def _get_or_create_release(tag: str) -> dict | None:
             )
             if r2.status_code in (200, 201):
                 return r2.json()
+            if r2.status_code == 422:
+                r3 = requests.get(url, headers=_headers(), timeout=30)
+                if r3.status_code == 200:
+                    return r3.json()
             logger.error("Failed to create release %s: %s %s", tag, r2.status_code, r2.text)
             return None
         logger.error("Unexpected status checking release %s: %s %s", tag, r.status_code, r.text)
@@ -97,14 +98,9 @@ def _get_or_create_release(tag: str) -> dict | None:
 
 
 def upload_batch(records: list, tag_prefix: str = "batch") -> tuple[bool, str]:
-    """Save locally, then upload as one asset to the appropriate release.
+    """Save locally, then upload as one asset (3 attempts). Returns (ok, url)."""
+    import time as _time
 
-    tag_prefix="batch"   -> tag = batch-YYYY-MM-DD   (per-day, normal data)
-    tag_prefix="flagged" -> tag = flagged-conversations (single, forever)
-
-    Records may be dict (ChatML) or str (raw). Both are accepted.
-    Returns (uploaded_ok, release_url_or_empty).
-    """
     now = datetime.now(timezone.utc)
     filename = f"{tag_prefix}_{now.strftime('%Y%m%d_%H%M%S')}{_slot_suffix()}.jsonl"
     local_path = write_local_batch(records, filename)
@@ -114,28 +110,28 @@ def upload_batch(records: list, tag_prefix: str = "batch") -> tuple[bool, str]:
     else:
         tag = f"{tag_prefix}-{now.strftime('%Y-%m-%d')}"
 
-    release = _get_or_create_release(tag)
-    if release is None:
-        logger.error("Could not get/create release %s; keeping local file only", tag)
-        return False, ""
+    for attempt in range(1, 4):
+        release = _get_or_create_release(tag)
+        if release is not None:
+            upload_url = release["upload_url"].split("{")[0]
+            try:
+                with local_path.open("rb") as f:
+                    headers = _headers()
+                    headers["Content-Type"] = "application/jsonl"
+                    r = requests.post(
+                        upload_url, headers=headers, params={"name": filename},
+                        data=f.read(), timeout=60,
+                    )
+                if r.status_code in (200, 201):
+                    asset = r.json()
+                    return True, asset.get("browser_download_url", release.get("html_url", ""))
+                if r.status_code == 422:
+                    return True, release.get("html_url", "")
+                logger.error("Asset upload failed (attempt %d): %s %s", attempt, r.status_code, r.text)
+            except (requests.RequestException, OSError) as exc:
+                logger.error("Exception uploading batch asset (attempt %d): %s", attempt, exc)
+        if attempt < 3:
+            _time.sleep(3 * attempt)
 
-    upload_url = release["upload_url"].split("{")[0]
-    try:
-        with local_path.open("rb") as f:
-            headers = _headers()
-            headers["Content-Type"] = "application/jsonl"
-            r = requests.post(
-                upload_url,
-                headers=headers,
-                params={"name": filename},
-                data=f.read(),
-                timeout=60,
-            )
-        if r.status_code in (200, 201):
-            asset = r.json()
-            return True, asset.get("browser_download_url", release.get("html_url", ""))
-        logger.error("Asset upload failed: %s %s", r.status_code, r.text)
-        return False, ""
-    except (requests.RequestException, OSError) as exc:
-        logger.error("Exception uploading batch asset: %s", exc)
-        return False, ""
+    logger.error("Could not upload %s after 3 attempts; local file only", filename)
+    return False, ""

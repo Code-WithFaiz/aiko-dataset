@@ -253,27 +253,27 @@ def send_daily_report(stats: dict | None = None) -> None:
         logger.error("Email env vars missing, skipping daily report")
         return
 
-    if stats is None:
-        stats = _build_stats_from_db()
-
-    body = _build_report_body(stats)
-    msg = MIMEText(body)
-    msg["Subject"] = f"Aiko Dataset — Daily Report [{today}]"
-    msg["From"] = gmail_user
-    msg["To"] = notify_email
+    if not db.claim_daily_report(today):
+        logger.info("Daily report already claimed by another slot, skipping")
+        return
 
     try:
+        if stats is None:
+            stats = _build_stats_from_db()
+        body = _build_report_body(stats)
+        msg = MIMEText(body)
+        msg["Subject"] = f"Aiko Dataset — Daily Report [{today}]"
+        msg["From"] = gmail_user
+        msg["To"] = notify_email
         with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as server:
             server.login(gmail_user, gmail_pass)
             server.sendmail(gmail_user, [notify_email], msg.as_string())
-        db.set_last_sent_date(today)
         logger.info(
             "Daily report sent (total=%d clean=%d flagged=%d)",
-            stats["total_generated"],
-            stats["total_clean"],
-            stats["total_flagged"],
+            stats["total_generated"], stats["total_clean"], stats["total_flagged"],
         )
-    except (smtplib.SMTPException, OSError) as exc:
+    except Exception as exc:
+        db.unclaim_daily_report()
         logger.error("Failed to send daily report: %s", exc)
 
 

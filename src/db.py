@@ -321,3 +321,21 @@ def get_last_sent_date() -> Optional[str]:
 def set_last_sent_date(date_str: str) -> None:
     db = get_db()
     db.notifier_state.update_one({"_id": "email"}, {"$set": {"last_sent_date": date_str}}, upsert=True)
+
+
+def claim_daily_report(date_str: str) -> bool:
+    """Atomically claim today's report so only ONE slot sends it."""
+    db = get_db()
+    try:
+        r = db.notifier_state.update_one(
+            {"_id": "email", "last_sent_date": {"$ne": date_str}},
+            {"$set": {"last_sent_date": date_str}},
+            upsert=True,
+        )
+        return r.modified_count == 1 or r.upserted_id is not None
+    except PyMongoError:
+        return False
+
+
+def unclaim_daily_report() -> None:
+    get_db().notifier_state.update_one({"_id": "email"}, {"$set": {"last_sent_date": ""}})

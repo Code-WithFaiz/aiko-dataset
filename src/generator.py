@@ -563,10 +563,11 @@ def call_gemini(prompt: str, api_key: str, model: str = PRIMARY_MODEL) -> str:
     try:
         response = _call(True)
     except TypeError:
-        # SDK doesn't accept generation_config -- fall back silently.
         response = _call(False)
     except Exception as exc:
         status = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+        if status in (400, 401, 403, 404, 429):
+            raise GeminiCallError(str(exc), status_code=status) from exc
         try:
             response = _call(True)
         except Exception as exc2:
