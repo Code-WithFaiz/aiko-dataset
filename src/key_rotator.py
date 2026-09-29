@@ -7,7 +7,7 @@ tracking, and a per-slot circuit breaker for server-side outages.
 
 If SLOT_ID is set (1-based), only that slot's block of KEYS_PER_SLOT keys
 is loaded -- e.g. SLOT_ID=1 -> keys 1-6, SLOT_ID=2 -> keys 7-12, ...
-SLOT_ID=6 -> keys 31-36. Without SLOT_ID, every GEMINI_KEY_* found in the
+SLOT_ID=5 -> keys 26-30. Without SLOT_ID, every GEMINI_KEY_* found in the
 environment is loaded (useful for local/manual test runs).
 
 CIRCUIT BREAKER
@@ -36,8 +36,8 @@ logger = logging.getLogger(__name__)
 
 RATE_LIMIT_COOLDOWN_SECONDS = 90
 ALL_COOLING_SLEEP_SECONDS = 60
-KEYS_PER_SLOT = 6
-MAX_KEY_INDEX = 36
+KEYS_PER_SLOT = 5
+MAX_KEY_INDEX = 30
 
 
 @dataclass
@@ -50,7 +50,7 @@ class KeyState:
 
 
 class KeyRotator:
-    """Round-robin rotator over GEMINI_KEY_1..GEMINI_KEY_36 (or one slot of 6)."""
+    """Round-robin rotator over GEMINI_KEY_1..GEMINI_KEY_30 (or one slot of 6)."""
 
     def __init__(self, keys: Optional[list[str]] = None) -> None:
         if keys is None:
