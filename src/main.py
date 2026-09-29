@@ -17,6 +17,11 @@ Circuit breaker (in KeyRotator):
 
 Sleeps are interruptible: shutdown signal or deadline is honoured
 within ~5 seconds, so a 5xx retry storm never overshoots the window.
+
+Key health self-heal:
+  On any successful call, the key's MongoDB record is cleared
+  (dead=False, cooldown_until=None) so a key that was temporarily
+  blocked and later recovers is reported correctly next time.
 """
 from __future__ import annotations
 
@@ -262,6 +267,9 @@ def _call_with_key_rotation(
             text = call_gemini(prompt, key, model=model)
             key_rotator.mark_success(key)
             db.increment_key_requests(_key_id(key))
+            # Self-heal: clear stale dead/cooldown flags on success,
+            # so a key that recovers is reported correctly next time.
+            db.update_key_stats(_key_id(key), dead=False, cooldown_until=None)
             return text, "ok"
         except GeminiCallError as exc:
             status = exc.status_code
