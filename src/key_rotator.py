@@ -5,22 +5,33 @@ Key rotation for Gemini API keys.
 Handles round-robin key selection, rate-limit cooldowns, dead-key
 tracking, and a per-slot circuit breaker for server-side outages.
 
-If SLOT_ID is set (1-based), only that slot's block of KEYS_PER_SLOT keys
-is loaded -- e.g. SLOT_ID=1 -> keys 1-9, SLOT_ID=2 -> keys 9-18, ...
-SLOT_ID=3 -> keys 18-26. Without SLOT_ID, every GEMINI_KEY_* found in the
-environment is loaded (useful for local/manual test runs).
+SLOT KEY DISTRIBUTION
+---------------------
+SLOT_KEY_COUNTS defines how many keys each slot gets. Slots are 1-based
+and consume keys sequentially: slot 1 gets the first N keys, slot 2 the
+next M, and so on. Total must equal MAX_KEY_INDEX.
+
+Current distribution (27 keys, 5 slots):
+  Slot 1 -> keys 1-6    (6 keys)
+  Slot 2 -> keys 7-12   (6 keys)
+  Slot 3 -> keys 13-17  (5 keys)
+  Slot 4 -> keys 18-22  (5 keys)
+  Slot 5 -> keys 23-27  (5 keys)
+
+Slots 1 and 2 are front-loaded because they hit the API first in every
+run; extra keys there keeps the overall pace consistent.
 
 CIRCUIT BREAKER
 ----------------
-When every key in this slot has returned a 5xx (500/503) at least once
-SINCE the last successful call, the circuit opens. While open:
+When every key in a slot has returned a 5xx (500/503) since the last
+successful call, the circuit opens. While open:
   - get_next_key() and wait_for_available_key() refuse to return any key
   - the caller (main._call_with_key_rotation) bails out with reason
     "server_side_down" so the slot shuts down gracefully without
     hammering the API further.
 
-A single success resets the whole wave: the circuit closes and every key
-is available again. Short server blips are tolerated; only a sustained
+A single success resets the wave: the circuit closes and every key is
+available again. Short server blips are tolerated; only a sustained
 outage trips the breaker.
 """
 from __future__ import annotations
@@ -36,7 +47,10 @@ logger = logging.getLogger(__name__)
 
 RATE_LIMIT_COOLDOWN_SECONDS = 90
 ALL_COOLING_SLEEP_SECONDS = 60
-KEYS_PER_SLOT = 9
+
+# Number of keys per slot, in slot order (slot 1 first). Sum must equal
+# MAX_KEY_INDEX. Change these together, never independently.
+SLOT_KEY_COUNTS = [6, 6, 5, 5, 5]
 MAX_KEY_INDEX = 27
 
 
@@ -50,7 +64,7 @@ class KeyState:
 
 
 class KeyRotator:
-    """Round-robin rotator over GEMINI_KEY_1..GEMINI_KEY_27 (or one slot of 3)."""
+    """Round-robin rotator over a slice of GEMINI_KEY_1..GEMINI_KEY_27."""
 
     def __init__(self, keys: Optional[list[str]] = None) -> None:
         if keys is None:
@@ -61,17 +75,34 @@ class KeyRotator:
         self._order: list[str] = list(keys)
         self._cursor = 0
         self._lock = Lock()
-        # Circuit breaker state
         self._server_error_keys: set[str] = set()
         self._circuit_open = False
 
     @staticmethod
+    def _slot_indices(slot: int) -> Optional[range]:
+        """Return the 1-based key indices for a slot, or None if out of range."""
+        if slot < 1 or slot > len(SLOT_KEY_COUNTS):
+            return None
+        start = sum(SLOT_KEY_COUNTS[: slot - 1]) + 1
+        count = SLOT_KEY_COUNTS[slot - 1]
+        return range(start, start + count)
+
+    @staticmethod
     def _load_keys_from_env() -> list[str]:
         slot_id = os.getenv("SLOT_ID", "").strip()
+        indices: range
         if slot_id:
             try:
                 slot = int(slot_id)
-                indices = range((slot - 1) * KEYS_PER_SLOT + 1, slot * KEYS_PER_SLOT + 1)
+                rng = KeyRotator._slot_indices(slot)
+                if rng is None:
+                    logger.error(
+                        "SLOT_ID=%d out of range [1..%d]; loading every key instead",
+                        slot, len(SLOT_KEY_COUNTS),
+                    )
+                    indices = range(1, MAX_KEY_INDEX + 1)
+                else:
+                    indices = rng
             except ValueError:
                 logger.error("SLOT_ID=%r is not a number; loading every key instead", slot_id)
                 indices = range(1, MAX_KEY_INDEX + 1)
@@ -136,9 +167,6 @@ class KeyRotator:
           - the hard deadline passes, or
           - stop_check() returns True (e.g. shutdown signal), or
           - max_wait_seconds is exhausted.
-
-        Sleeps in short chunks so deadline, circuit state, and stop
-        conditions are honoured with ~5-second granularity.
         """
         chunk = 5.0
         waited = 0.0
@@ -210,7 +238,6 @@ class KeyRotator:
         with self._lock:
             if key in self._states:
                 self._states[key].requests_made += 1
-            # A success closes the circuit and clears the wave.
             if self._server_error_keys or self._circuit_open:
                 logger.info(
                     "Success on %s — resetting server-error wave (was %d keys)",

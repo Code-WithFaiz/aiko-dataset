@@ -10,7 +10,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        slot: [1, 2, 3]
+        slot: [1, 2, 3, 4, 5]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -26,15 +26,15 @@ jobs:
       - name: Run generator (slot ${{ matrix.slot }})
         env:
           SLOT_ID: ${{ matrix.slot }}
-          GEMINI_KEY_1: ${{ secrets.GEMINI_KEY_1 }}
-          GEMINI_KEY_2: ${{ secrets.GEMINI_KEY_2 }}
-          GEMINI_KEY_3: ${{ secrets.GEMINI_KEY_3 }}
-          GEMINI_KEY_4: ${{ secrets.GEMINI_KEY_4 }}
-          GEMINI_KEY_5: ${{ secrets.GEMINI_KEY_5 }}
-          GEMINI_KEY_6: ${{ secrets.GEMINI_KEY_6 }}
-          GEMINI_KEY_7: ${{ secrets.GEMINI_KEY_7 }}
-          GEMINI_KEY_8: ${{ secrets.GEMINI_KEY_8 }}
-          GEMINI_KEY_9: ${{ secrets.GEMINI_KEY_9 }}
+          GEMINI_KEY_1:  ${{ secrets.GEMINI_KEY_1 }}
+          GEMINI_KEY_2:  ${{ secrets.GEMINI_KEY_2 }}
+          GEMINI_KEY_3:  ${{ secrets.GEMINI_KEY_3 }}
+          GEMINI_KEY_4:  ${{ secrets.GEMINI_KEY_4 }}
+          GEMINI_KEY_5:  ${{ secrets.GEMINI_KEY_5 }}
+          GEMINI_KEY_6:  ${{ secrets.GEMINI_KEY_6 }}
+          GEMINI_KEY_7:  ${{ secrets.GEMINI_KEY_7 }}
+          GEMINI_KEY_8:  ${{ secrets.GEMINI_KEY_8 }}
+          GEMINI_KEY_9:  ${{ secrets.GEMINI_KEY_9 }}
           GEMINI_KEY_10: ${{ secrets.GEMINI_KEY_10 }}
           GEMINI_KEY_11: ${{ secrets.GEMINI_KEY_11 }}
           GEMINI_KEY_12: ${{ secrets.GEMINI_KEY_12 }}
@@ -63,6 +63,4 @@ jobs:
           DAILY_TARGET: ${{ secrets.DAILY_TARGET }}
           BATCH_SIZE: ${{ secrets.BATCH_SIZE }}
           TEMPERATURE: ${{ secrets.TEMPERATURE }}
-          MAX_RETRIES: ${{ secrets.MAX_RETRIES }}
-          TURNS_PREFERRED: ${{ secrets.TURNS_PREFERRED }}
         run: python -m src.main
