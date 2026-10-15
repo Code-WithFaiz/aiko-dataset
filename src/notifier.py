@@ -32,7 +32,6 @@ logger = logging.getLogger(__name__)
 
 
 def _key_id(key: str) -> str:
-    """Same hash used by main.py -- deterministic mapping key -> key_stats._id."""
     return f"key_{hashlib.sha256(key.encode()).hexdigest()[:12]}"
 
 
@@ -45,7 +44,6 @@ def _safe_mongo_size_mb() -> float:
 
 
 def _build_key_health() -> dict:
-    """Read-only key health from MongoDB. ZERO Gemini API calls."""
     database = db.get_db()
     now = datetime.now(timezone.utc).replace(tzinfo=None)
 
@@ -86,7 +84,6 @@ def _build_key_health() -> dict:
 
 
 def _build_stats_from_db() -> dict:
-    """Build report stats from batch_log (single pass, per-tag buckets)."""
     database = db.get_db()
     now = datetime.now(timezone.utc)
     yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")

@@ -39,10 +39,8 @@ EMOJI_RE = re.compile("[" + EMOJI_CLASS + "]")
 TOKEN = "[" + EMOJI_CLASS + "][\ufe0f]?"
 EMOJI_RUN_RE = re.compile("(?:" + TOKEN + r"[ \t]?){3,}")
 
-# Single speaker tag at start of a line
 TAG_RE = re.compile(r"^\s*\**(user|aiko)\**\s*:\s*\**\s*(.*)$", re.IGNORECASE)
 
-# Narration patterns -- HARD reject in Aiko's lines.
 DOUBLE_TAG_RE = re.compile(
     r"^\s*\**(user|aiko)\**\s*:\s*\**\s*\**(user|aiko)\**\s*:\s*(.*)$",
     re.IGNORECASE,
@@ -107,11 +105,7 @@ def _cfg() -> dict:
     }
 
 
-# ─────────────────────────────────────────────────────────
-# Double-tag fixer (silent)
-# ─────────────────────────────────────────────────────────
 def fix_double_tags(text: str) -> tuple[str, int]:
-    """Collapse 'Aiko:Aiko:', 'Aiko: Aiko:', 'User:Aiko:' etc. to a single tag."""
     lines = text.split("\n")
     out: list[str] = []
     prev_tag: str | None = None
@@ -146,12 +140,7 @@ def fix_double_tags(text: str) -> tuple[str, int]:
     return "\n".join(out), fixed
 
 
-# ─────────────────────────────────────────────────────────
-# Turn parsing / rendering
-# ─────────────────────────────────────────────────────────
 def parse_turns(text: str):
-    """Line-based: a line starting 'user:' / 'Aiko:' opens a turn;
-    other lines continue it. Double tags are collapsed first."""
     text, _ = fix_double_tags(text)
 
     lines = [l for l in text.strip().splitlines() if not l.strip().startswith("```")]
@@ -189,9 +178,6 @@ def render(turns) -> str:
     return "\n\n".join("%s: %s" % (s, c) for s, c in turns)
 
 
-# ─────────────────────────────────────────────────────────
-# Auto-fixers
-# ─────────────────────────────────────────────────────────
 def fix_address(text: str):
     count = 0
 
@@ -241,9 +227,6 @@ def _nlines(content: str) -> int:
     return max(1, len(re.findall(r"[.!?\u2026]+(?:\s|$)", lines[0])))
 
 
-# ─────────────────────────────────────────────────────────
-# Main
-# ─────────────────────────────────────────────────────────
 def process(text: str) -> dict:
     cfg = _cfg()
     res = {"ok": False, "reason": "", "flags": [], "fixes": 0, "turns": [], "text": ""}

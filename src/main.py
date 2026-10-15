@@ -22,9 +22,6 @@ Key health self-heal:
   On any successful call, the key's MongoDB record is cleared
   (dead=False, cooldown_until=None) so a key that was temporarily
   blocked and later recovers is reported correctly next time.
-
-Signal handlers are registered BEFORE the run lock is acquired, so
-a SIGINT during startup still shuts down cleanly and releases the lock.
 """
 from __future__ import annotations
 
@@ -78,17 +75,13 @@ def _env_int(name, default):
         return default
 
 
-# NOTE: BATCH_SIZE is the number of generation attempts per run
-# (name kept for GitHub Actions workflow compatibility).
 LOOP_ITERATIONS = _env_int("BATCH_SIZE", 100)
 BATCH_UPLOAD_THRESHOLD = 15
 RUN_DEADLINE_SECONDS = 52 * 60
 TONE_HISTORY_SIZE = 25
 RATE_LIMIT_COOLDOWN_SECONDS = 90
 
-# Flat sleep between consecutive 5xx retries.
 SERVER_5XX_SLEEP_SECONDS = 15
-# Model fallback after this many consecutive 5xx on the primary.
 MAX_CONSECUTIVE_5XX = 3
 
 _shutdown_requested = False
@@ -101,8 +94,6 @@ def _signal_handler(signum, frame):
 
 
 def _interruptible_sleep(seconds: float, deadline: float | None = None, chunk: float = 5.0) -> bool:
-    """Sleep in small chunks so signals and deadline are honoured.
-    Returns True if fully slept, False if interrupted."""
     end = time.monotonic() + max(0.0, seconds)
     while True:
         if _shutdown_requested:
@@ -115,9 +106,8 @@ def _interruptible_sleep(seconds: float, deadline: float | None = None, chunk: f
         time.sleep(min(chunk, end - now))
 
 
-# ─────────────────────────────────────────────────────────
-# Config loading
-# ─────────────────────────────────────────────────────────
+# ---------- Config loading ----------
+
 def load_topics() -> dict:
     return json.loads((CONFIG_DIR / "topics.json").read_text(encoding="utf-8"))
 
@@ -135,9 +125,8 @@ def get_or_build_leaf_order(topics_tree: dict) -> tuple[dict[str, dict], list[st
     return leaf_by_path, order
 
 
-# ─────────────────────────────────────────────────────────
-# Conversation generation
-# ─────────────────────────────────────────────────────────
+# ---------- Conversation generation ----------
+
 def _track_tone(recent: list[str], cat_name: str) -> None:
     recent.append(cat_name)
     if len(recent) > TONE_HISTORY_SIZE:
@@ -150,7 +139,6 @@ def generate_one(
     recent_tone_cats: list[str],
     deadline: float | None = None,
 ) -> tuple[dict | None, str, list[str]]:
-    """Returns (chatml_record_or_None, reason, flags)."""
     recent_signatures = db.get_recent_signatures()
     recent_openings = db.get_recent_openings()
     category_map = load_category_map()
@@ -216,25 +204,11 @@ def generate_one(
     return None, "exhausted_retries", []
 
 
-# ─────────────────────────────────────────────────────────
-# Gemini call with key rotation + circuit breaker
-# ─────────────────────────────────────────────────────────
+# ---------- Gemini call with key rotation ----------
+
 def _call_with_key_rotation(
     key_rotator: KeyRotator, prompt: str, deadline: float | None = None
 ) -> tuple[str | None, str]:
-    """Return (text_or_None, reason).
-
-    Reasons:
-      "ok"                 success
-      "server_side_down"   circuit opened (all keys 5xx'd)
-      "shutdown"           shutdown signal received
-      "deadline_reached"   deadline hit
-      "all_keys_dead"      every key 401/403'd
-      "all_keys_cooling"   all keys rate-limited longer than wait window
-      "retries_exhausted"  both models gave up on repeated 5xx
-      "interrupted"        interruptible_sleep bailed during a 5xx wait
-      "unknown_error"      some other Gemini error
-    """
     model = PRIMARY_MODEL
     consecutive_5xx = 0
 
@@ -271,8 +245,6 @@ def _call_with_key_rotation(
             text = call_gemini(prompt, key, model=model)
             key_rotator.mark_success(key)
             db.increment_key_requests(_key_id(key))
-            # Self-heal: clear stale dead/cooldown flags on success,
-            # so a key that recovers is reported correctly next time.
             db.update_key_stats(_key_id(key), dead=False, cooldown_until=None)
             return text, "ok"
         except GeminiCallError as exc:
@@ -336,12 +308,9 @@ def _key_id(key: str) -> str:
     return f"key_{hashlib.sha256(key.encode()).hexdigest()[:12]}"
 
 
-# ─────────────────────────────────────────────────────────
-# Run orchestration
-# ─────────────────────────────────────────────────────────
+# ---------- Run orchestration ----------
+
 def run() -> int:
-    # Register signal handlers BEFORE acquiring the lock, so a SIGTERM
-    # during startup still triggers graceful shutdown + lock release.
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
 
@@ -491,7 +460,6 @@ def _run_locked() -> int:
 
 
 def _flush_batch(batch: list[dict], tag_prefix: str = "batch") -> bool:
-    """Upload one batch and log it. Returns True on success."""
     ok, url = storage.upload_batch(batch, tag_prefix=tag_prefix)
     slot = os.getenv("SLOT_ID", "0")
     batch_id = f"{tag_prefix}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_s{slot}"

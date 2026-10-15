@@ -44,14 +44,13 @@ def get_db() -> Database:
     if not uri or not db_name:
         raise RuntimeError("MONGO_URI / MONGO_DB_NAME not set")
     _client = MongoClient(uri, serverSelectionTimeoutMS=10000)
-    _client.admin.command("ping")  # fail fast if unreachable
+    _client.admin.command("ping")
     _db = _client[db_name]
     _ensure_indexes(_db)
     return _db
 
 
 def _ensure_indexes(db: Database) -> None:
-    """Create indexes needed for state queries. Idempotent and safe."""
     try:
         db.seen_hashes.create_index("hash", unique=True)
     except PyMongoError as e:
@@ -62,7 +61,7 @@ def _ensure_indexes(db: Database) -> None:
         logger.warning("Could not create seen_hashes.created_at TTL index: %s", e)
 
 
-# ---------- Run lock (concurrency safety) ----------
+# ---------- Run lock ----------
 
 def acquire_run_lock() -> Optional[str]:
     """Try any of the RUN_LOCK_SLOTS. Returns lock_id if acquired, else None."""
@@ -168,7 +167,6 @@ def set_leaf_order(paths: list[str]) -> None:
 
 
 def init_leaf_quotas(leaves: list[dict]) -> None:
-    """Idempotent bulk upsert of leaf quotas. ~10x faster than sequential."""
     db = get_db()
     n = len(leaves)
     if n == 0:
@@ -201,7 +199,6 @@ def init_leaf_quotas(leaves: list[dict]) -> None:
 
 
 def get_next_leaf_path(ordered_paths: list[str]) -> Optional[str]:
-    """First leaf (in shuffled order) whose generated < quota."""
     db = get_db()
     cursor = db.leaf_state.find(
         {"$expr": {"$lt": ["$generated", "$quota"]}},
@@ -237,11 +234,7 @@ def hash_exists(h: str) -> bool:
 
 
 def add_hash(h: str) -> None:
-    """Insert hash. Duplicate key race is fine -- hash already recorded.
-
-    Other PyMongoError (network, write concern) are NOT swallowed: they
-    propagate so the caller knows dedup state was not updated.
-    """
+    """Insert hash. Duplicate key race is fine -- hash already recorded."""
     db = get_db()
     try:
         db.seen_hashes.insert_one({"hash": h, "created_at": datetime.now(timezone.utc)})
@@ -303,7 +296,6 @@ def increment_key_requests(key_id: str) -> None:
 # ---------- Batch log ----------
 
 def log_batch(batch_id: str, release_url: str, count: int, tag_prefix: str = "batch") -> None:
-    """Log a completed upload. tag_prefix distinguishes clean vs flagged."""
     db = get_db()
     db.batch_log.insert_one(
         {

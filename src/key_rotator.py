@@ -18,12 +18,6 @@ Current distribution (27 keys, 5 slots):
   Slot 4 -> keys 18-22  (5 keys)
   Slot 5 -> keys 23-27  (5 keys)
 
-SLOT_ID SAFETY
---------------
-If SLOT_ID is set but out of range, we HARD FAIL. We never fall back
-to loading every key -- that would collide with other slots and cause
-a 429 storm. Silently loading all keys is worse than a clean exit.
-
 CIRCUIT BREAKER
 ----------------
 When every key in a slot has returned a 5xx (500/503) since the last
@@ -80,7 +74,6 @@ class KeyRotator:
 
     @staticmethod
     def _slot_indices(slot: int) -> Optional[range]:
-        """Return the 1-based key indices for a slot, or None if out of range."""
         if slot < 1 or slot > len(SLOT_KEY_COUNTS):
             return None
         start = sum(SLOT_KEY_COUNTS[: slot - 1]) + 1
@@ -93,13 +86,11 @@ class KeyRotator:
         indices: range
 
         if not slot_id:
-            # No SLOT_ID: single-run / local testing. Load all keys.
             indices = range(1, MAX_KEY_INDEX + 1)
         else:
             try:
                 slot = int(slot_id)
             except ValueError:
-                # HARD FAIL -- a non-numeric SLOT_ID is a config error.
                 raise RuntimeError(
                     f"SLOT_ID={slot_id!r} is not a number; refusing to start. "
                     f"Set SLOT_ID to an integer in [1..{len(SLOT_KEY_COUNTS)}]."
@@ -107,8 +98,6 @@ class KeyRotator:
 
             rng = KeyRotator._slot_indices(slot)
             if rng is None:
-                # HARD FAIL -- never fall back to "load all keys"; that would
-                # collide with every other slot and trip rate limits.
                 raise RuntimeError(
                     f"SLOT_ID={slot} out of range [1..{len(SLOT_KEY_COUNTS)}]; "
                     f"refusing to load every key (would collide with other slots)."
@@ -136,11 +125,6 @@ class KeyRotator:
             return self._circuit_open
 
     def get_next_key(self) -> Optional[str]:
-        """Return the next usable key, or None if none is currently usable.
-
-        A key is skipped if it is dead, cooling down, or has already
-        returned a 5xx since the last success (server-error wave).
-        """
         with self._lock:
             now = time.time()
             n = len(self._order)
@@ -167,13 +151,6 @@ class KeyRotator:
         deadline: Optional[float] = None,
         stop_check: Optional[Callable[[], bool]] = None,
     ) -> Optional[str]:
-        """Block until a key frees up, or return None if:
-          - every key is dead, or
-          - the circuit breaker has opened, or
-          - the hard deadline passes, or
-          - stop_check() returns True (e.g. shutdown signal), or
-          - max_wait_seconds is exhausted.
-        """
         chunk = 5.0
         waited = 0.0
 
@@ -225,8 +202,6 @@ class KeyRotator:
                 logger.error("Key %s marked DEAD", self._mask(key))
 
     def mark_server_error(self, key: str) -> None:
-        """Record a 5xx response from this key. When every key in the slot
-        has reported a 5xx since the last success, open the circuit."""
         with self._lock:
             if key not in self._states:
                 return

@@ -53,7 +53,6 @@ def _repo() -> str:
 
 
 def _serialize(rec) -> str:
-    """Turn one item (dict or str) into a single JSONL line."""
     if isinstance(rec, dict):
         return json.dumps(rec, ensure_ascii=False)
     return json.dumps({"conversation": rec}, ensure_ascii=False)
@@ -98,19 +97,22 @@ def _get_or_create_release(tag: str) -> dict | None:
 
 
 def _is_already_exists_422(resp: requests.Response) -> bool:
-    """True only if 422 is the harmless 'asset already exists' case."""
     try:
         err = resp.json()
     except Exception:
         return False
-    for e in err.get("errors", []) or []:
-        if (e.get("code") or "").lower() == "already_exists":
+    if not isinstance(err, dict):
+        return False
+    errors = err.get("errors") or []
+    if not isinstance(errors, list):
+        return False
+    for e in errors:
+        if isinstance(e, dict) and (e.get("code") or "").lower() == "already_exists":
             return True
     return False
 
 
 def upload_batch(records: list, tag_prefix: str = "batch") -> tuple[bool, str]:
-    """Save locally, then upload as one asset (3 attempts). Returns (ok, url)."""
     import time as _time
 
     now = datetime.now(timezone.utc)
@@ -139,9 +141,6 @@ def upload_batch(records: list, tag_prefix: str = "batch") -> tuple[bool, str]:
                     return True, asset.get("browser_download_url", release.get("html_url", ""))
 
                 if r.status_code == 422:
-                    # 422 has many causes. Only "already_exists" is safe to
-                    # treat as success. Anything else (bad name, too large,
-                    # validation failed) is a real failure -- retry / alert.
                     if _is_already_exists_422(r):
                         logger.info(
                             "Asset %s already exists on GitHub (422 already_exists) -- OK",
@@ -152,7 +151,6 @@ def upload_batch(records: list, tag_prefix: str = "batch") -> tuple[bool, str]:
                         "Asset upload 422 (NOT already_exists) attempt %d: %s",
                         attempt, r.text[:300],
                     )
-                    # fall through and retry
                 else:
                     logger.error(
                         "Asset upload failed (attempt %d): %s %s",
