@@ -60,7 +60,6 @@ jobs:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
-          DAILY_TARGET: ${{ secrets.DAILY_TARGET }}
           BATCH_SIZE: ${{ secrets.BATCH_SIZE }}
           TEMPERATURE: ${{ secrets.TEMPERATURE }}
         run: python -m src.main
