@@ -26,11 +26,9 @@ from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 
 from src import db
+from src.constants import MAX_KEY_INDEX, TOTAL_TARGET
 
 logger = logging.getLogger(__name__)
-
-# Must match key_rotator.MAX_KEY_INDEX. Kept local to avoid coupling.
-_MAX_KEY_INDEX = 36
 
 
 def _key_id(key: str) -> str:
@@ -53,7 +51,7 @@ def _build_key_health() -> dict:
 
     working, dead, cooling, unknown = [], [], [], []
 
-    for i in range(1, _MAX_KEY_INDEX + 1):
+    for i in range(1, MAX_KEY_INDEX + 1):
         key = os.getenv(f"GEMINI_KEY_{i}")
         if not key:
             continue
@@ -150,8 +148,8 @@ def _build_stats_from_db() -> dict:
         total_leaves = 0
         leaves_completed = 0
 
-    pct = (grand_total / 600_000) * 100 if grand_total else 0.0
-    remaining = max(0, 600_000 - grand_total)
+    pct = (grand_total / TOTAL_TARGET) * 100 if grand_total else 0.0
+    remaining = max(0, TOTAL_TARGET - grand_total)
 
     avg_per_day = (grand_total / days_elapsed) if days_elapsed > 0 and grand_total else 1
     recent_rate = recent_total / 3 if recent_total else avg_per_day
@@ -201,7 +199,7 @@ def _build_report_body(stats: dict) -> str:
     unknown = kh.get("unknown", [])
 
     return f"""=== SUMMARY ===
-Total generated:       {stats['total_generated']:,} / 600,000 ({stats['pct_complete']:.2f}%)
+Total generated:       {stats['total_generated']:,} / {TOTAL_TARGET:,} ({stats['pct_complete']:.2f}%)
 Total batches:         {stats['total_batches']:,}
 Yesterday generated:   {stats['yesterday_total']:,}
 Today so far:          {stats['today_total']:,}
@@ -233,7 +231,7 @@ MongoDB size:          {stats['mongo_size_mb']:.1f} MB / 512 MB
 
 === NEXT 24H TARGET ===
 Target:                ~{stats['recent_rate']:,} conversations
-Remaining to 600k:     {max(0, 600_000 - stats['total_generated']):,}
+Remaining to {TOTAL_TARGET // 1000}k:      {max(0, TOTAL_TARGET - stats['total_generated']):,}
 
 ---
 Key health is READ-ONLY from MongoDB key_stats. No Gemini API calls.
@@ -262,7 +260,7 @@ def send_daily_report(stats: dict | None = None) -> None:
             stats = _build_stats_from_db()
         body = _build_report_body(stats)
         msg = MIMEText(body)
-        msg["Subject"] = f"Aiko Dataset — Daily Report [{today}]"
+        msg["Subject"] = f"Aiko Dataset -- Daily Report [{today}]"
         msg["From"] = gmail_user
         msg["To"] = notify_email
         with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as server:
@@ -285,7 +283,7 @@ def send_critical_alert(subject: str, body: str) -> None:
         logger.error("Email env vars missing, cannot send critical alert: %s", subject)
         return
     msg = MIMEText(body)
-    msg["Subject"] = f"[CRITICAL] Aiko Dataset — {subject}"
+    msg["Subject"] = f"[CRITICAL] Aiko Dataset -- {subject}"
     msg["From"] = gmail_user
     msg["To"] = notify_email
     try:

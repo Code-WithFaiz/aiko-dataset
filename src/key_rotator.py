@@ -7,9 +7,9 @@ tracking, and a per-slot circuit breaker for server-side outages.
 
 SLOT KEY DISTRIBUTION
 ---------------------
-SLOT_KEY_COUNTS defines how many keys each slot gets. Slots are 1-based
-and consume keys sequentially: slot 1 gets the first N keys, slot 2 the
-next M, and so on. Total must equal MAX_KEY_INDEX.
+SLOT_KEY_COUNTS (in src/constants.py) defines how many keys each slot
+gets. Slots are 1-based and consume keys sequentially: slot 1 gets the
+first N keys, slot 2 the next M, and so on.
 
 Current distribution (27 keys, 5 slots):
   Slot 1 -> keys 1-6    (6 keys)
@@ -18,8 +18,11 @@ Current distribution (27 keys, 5 slots):
   Slot 4 -> keys 18-22  (5 keys)
   Slot 5 -> keys 23-27  (5 keys)
 
-Slots 1 and 2 are front-loaded because they hit the API first in every
-run; extra keys there keeps the overall pace consistent.
+SLOT_ID SAFETY
+--------------
+If SLOT_ID is set but out of range, we HARD FAIL. We never fall back
+to loading every key -- that would collide with other slots and cause
+a 429 storm. Silently loading all keys is worse than a clean exit.
 
 CIRCUIT BREAKER
 ----------------
@@ -43,15 +46,12 @@ from dataclasses import dataclass
 from threading import Lock
 from typing import Callable, Optional
 
+from src.constants import MAX_KEY_INDEX, SLOT_KEY_COUNTS
+
 logger = logging.getLogger(__name__)
 
 RATE_LIMIT_COOLDOWN_SECONDS = 90
 ALL_COOLING_SLEEP_SECONDS = 60
-
-# Number of keys per slot, in slot order (slot 1 first). Sum must equal
-# MAX_KEY_INDEX. Change these together, never independently.
-SLOT_KEY_COUNTS = [6, 6, 5, 5, 5]
-MAX_KEY_INDEX = 27
 
 
 @dataclass
@@ -91,23 +91,29 @@ class KeyRotator:
     def _load_keys_from_env() -> list[str]:
         slot_id = os.getenv("SLOT_ID", "").strip()
         indices: range
-        if slot_id:
+
+        if not slot_id:
+            # No SLOT_ID: single-run / local testing. Load all keys.
+            indices = range(1, MAX_KEY_INDEX + 1)
+        else:
             try:
                 slot = int(slot_id)
-                rng = KeyRotator._slot_indices(slot)
-                if rng is None:
-                    logger.error(
-                        "SLOT_ID=%d out of range [1..%d]; loading every key instead",
-                        slot, len(SLOT_KEY_COUNTS),
-                    )
-                    indices = range(1, MAX_KEY_INDEX + 1)
-                else:
-                    indices = rng
             except ValueError:
-                logger.error("SLOT_ID=%r is not a number; loading every key instead", slot_id)
-                indices = range(1, MAX_KEY_INDEX + 1)
-        else:
-            indices = range(1, MAX_KEY_INDEX + 1)
+                # HARD FAIL -- a non-numeric SLOT_ID is a config error.
+                raise RuntimeError(
+                    f"SLOT_ID={slot_id!r} is not a number; refusing to start. "
+                    f"Set SLOT_ID to an integer in [1..{len(SLOT_KEY_COUNTS)}]."
+                )
+
+            rng = KeyRotator._slot_indices(slot)
+            if rng is None:
+                # HARD FAIL -- never fall back to "load all keys"; that would
+                # collide with every other slot and trip rate limits.
+                raise RuntimeError(
+                    f"SLOT_ID={slot} out of range [1..{len(SLOT_KEY_COUNTS)}]; "
+                    f"refusing to load every key (would collide with other slots)."
+                )
+            indices = rng
 
         keys = []
         for i in indices:
@@ -230,7 +236,7 @@ class KeyRotator:
                 if not self._circuit_open:
                     self._circuit_open = True
                     logger.critical(
-                        "Circuit breaker OPEN — all %d keys returned 5xx",
+                        "Circuit breaker OPEN -- all %d keys returned 5xx",
                         len(self._order),
                     )
 
@@ -240,7 +246,7 @@ class KeyRotator:
                 self._states[key].requests_made += 1
             if self._server_error_keys or self._circuit_open:
                 logger.info(
-                    "Success on %s — resetting server-error wave (was %d keys)",
+                    "Success on %s -- resetting server-error wave (was %d keys)",
                     self._mask(key), len(self._server_error_keys),
                 )
                 self._server_error_keys.clear()

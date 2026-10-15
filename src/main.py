@@ -22,6 +22,9 @@ Key health self-heal:
   On any successful call, the key's MongoDB record is cleared
   (dead=False, cooldown_until=None) so a key that was temporarily
   blocked and later recovers is reported correctly next time.
+
+Signal handlers are registered BEFORE the run lock is acquired, so
+a SIGINT during startup still shuts down cleanly and releases the lock.
 """
 from __future__ import annotations
 
@@ -75,9 +78,10 @@ def _env_int(name, default):
         return default
 
 
+# NOTE: BATCH_SIZE is the number of generation attempts per run
+# (name kept for GitHub Actions workflow compatibility).
 LOOP_ITERATIONS = _env_int("BATCH_SIZE", 100)
 BATCH_UPLOAD_THRESHOLD = 15
-DAILY_TARGET = _env_int("DAILY_TARGET", 6700)
 RUN_DEADLINE_SECONDS = 52 * 60
 TONE_HISTORY_SIZE = 25
 RATE_LIMIT_COOLDOWN_SECONDS = 90
@@ -336,6 +340,11 @@ def _key_id(key: str) -> str:
 # Run orchestration
 # ─────────────────────────────────────────────────────────
 def run() -> int:
+    # Register signal handlers BEFORE acquiring the lock, so a SIGTERM
+    # during startup still triggers graceful shutdown + lock release.
+    signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
+
     logger.info("=== Aiko generator run starting ===")
     run_id = db.acquire_run_lock()
     if run_id is None:
@@ -349,9 +358,6 @@ def run() -> int:
 
 
 def _run_locked() -> int:
-    signal.signal(signal.SIGINT, _signal_handler)
-    signal.signal(signal.SIGTERM, _signal_handler)
-
     try:
         topics_tree = load_topics()
     except (OSError, json.JSONDecodeError) as exc:
@@ -393,7 +399,7 @@ def _run_locked() -> int:
 
         if key_rotator.is_circuit_open():
             logger.critical(
-                "Circuit breaker OPEN — server side outage. "
+                "Circuit breaker OPEN -- server side outage. "
                 "Flushing %d clean + %d flagged and exiting gracefully.",
                 len(batch), len(flagged_batch),
             )
@@ -412,7 +418,7 @@ def _run_locked() -> int:
 
         leaf_path = db.get_next_leaf_path(order)
         if leaf_path is None:
-            logger.info("All leaf quotas filled — dataset complete!")
+            logger.info("All leaf quotas filled -- dataset complete!")
             break
         leaf = leaf_by_path[leaf_path]
 

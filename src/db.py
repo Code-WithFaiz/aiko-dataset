@@ -19,7 +19,9 @@ from typing import Optional
 from pymongo import ASCENDING, MongoClient, UpdateOne
 from pymongo.collection import Collection
 from pymongo.database import Database
-from pymongo.errors import PyMongoError
+from pymongo.errors import DuplicateKeyError, PyMongoError
+
+from src.constants import RUN_LOCK_SLOTS, TOTAL_TARGET
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +29,6 @@ _client: Optional[MongoClient] = None
 _db: Optional[Database] = None
 
 
-RUN_LOCK_SLOTS = ["1", "2", "3", "4", "5", "6"]
 RUN_LOCK_TTL_SECONDS = 75 * 60
 SIGNATURE_BUFFER_CAP = 5000
 OPENING_BUFFER_CAP = 500
@@ -172,8 +173,8 @@ def init_leaf_quotas(leaves: list[dict]) -> None:
     n = len(leaves)
     if n == 0:
         return
-    base_quota = 600_000 // n
-    remainder = 600_000 % n
+    base_quota = TOTAL_TARGET // n
+    remainder = TOTAL_TARGET % n
 
     ops = []
     for i, leaf in enumerate(leaves):
@@ -236,11 +237,16 @@ def hash_exists(h: str) -> bool:
 
 
 def add_hash(h: str) -> None:
+    """Insert hash. Duplicate key race is fine -- hash already recorded.
+
+    Other PyMongoError (network, write concern) are NOT swallowed: they
+    propagate so the caller knows dedup state was not updated.
+    """
     db = get_db()
     try:
         db.seen_hashes.insert_one({"hash": h, "created_at": datetime.now(timezone.utc)})
-    except PyMongoError:
-        pass  # duplicate key race is fine, hash already recorded
+    except DuplicateKeyError:
+        pass
 
 
 def get_recent_signatures(limit: int = SIGNATURE_BUFFER_CAP) -> list[str]:
@@ -316,11 +322,6 @@ def get_last_sent_date() -> Optional[str]:
     db = get_db()
     doc = db.notifier_state.find_one({"_id": "email"})
     return doc["last_sent_date"] if doc else None
-
-
-def set_last_sent_date(date_str: str) -> None:
-    db = get_db()
-    db.notifier_state.update_one({"_id": "email"}, {"$set": {"last_sent_date": date_str}}, upsert=True)
 
 
 def claim_daily_report(date_str: str) -> bool:

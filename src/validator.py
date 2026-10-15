@@ -42,7 +42,7 @@ EMOJI_RUN_RE = re.compile("(?:" + TOKEN + r"[ \t]?){3,}")
 # Single speaker tag at start of a line
 TAG_RE = re.compile(r"^\s*\**(user|aiko)\**\s*:\s*\**\s*(.*)$", re.IGNORECASE)
 
-# Two consecutive speaker tags at start of a line (same or different)
+# Narration patterns -- HARD reject in Aiko's lines.
 DOUBLE_TAG_RE = re.compile(
     r"^\s*\**(user|aiko)\**\s*:\s*\**\s*\**(user|aiko)\**\s*:\s*(.*)$",
     re.IGNORECASE,
@@ -50,7 +50,6 @@ DOUBLE_TAG_RE = re.compile(
 
 LETTER_RE = re.compile(r"[A-Za-z\u0900-\u097F]")
 
-# Narration patterns -- HARD reject in Aiko's lines.
 NARRATOR_RE = re.compile(r"\*[^*\n]+\*|\b[A-Za-z]+\*\s*$", re.MULTILINE)
 PAREN_RE = re.compile(r"\([^)\n]{8,}\)")
 
@@ -60,7 +59,6 @@ AI_PHRASES = [
     "language model", "main bot", "sorry i can't help", "how can i assist",
 ]
 
-# Narrow refusal list -- only TRUE bot-style refusals.
 REFUSAL_PHRASES = ["main ye nahi kar sakti", "sorry main nahi kar", "help nahi kar sakti"]
 
 ADDRESS_MAP = {
@@ -254,7 +252,6 @@ def process(text: str) -> dict:
         res["reason"] = reason
         return res
 
-    # Fix double tags before parsing (silent)
     text, dtag_fixes = fix_double_tags(text or "")
 
     turns = parse_turns(text)
@@ -276,7 +273,6 @@ def process(text: str) -> dict:
         if spk != ("user" if i % 2 == 0 else "Aiko"):
             return bad("bad_alternation(turn %d)" % i)
 
-    # Hard checks
     for spk, c in turns:
         low = c.lower()
         if any(rx.search(low) for rx in cfg["abuse_hard"]):
@@ -284,7 +280,6 @@ def process(text: str) -> dict:
         if spk != "Aiko":
             continue
 
-        # NARRATION -> NO MERCY
         if NARRATOR_RE.search(c) or PAREN_RE.search(c):
             return bad("narration_detected")
 
@@ -297,7 +292,6 @@ def process(text: str) -> dict:
         if any(p in low for p in AI_PHRASES):
             return bad("claims_ai")
 
-    # Auto-fixes
     fixed, fixes = [], dtag_fixes
     for spk, c in turns:
         if spk == "Aiko":
@@ -306,9 +300,6 @@ def process(text: str) -> dict:
             fixes += k1 + k2
         fixed.append((spk, c))
 
-    # Only reject if Aiko wrote ZERO letters in the entire conversation
-    # (i.e. only emojis everywhere = LLM failure).
-    # Any number of emoji-only turns is fine -- wordless moments are natural.
     aiko_text = "\n".join(c for s, c in fixed if s == "Aiko")
     if not LETTER_RE.search(aiko_text):
         return bad("no_words_in_conversation")
@@ -319,7 +310,6 @@ def process(text: str) -> dict:
     if best_turn < 3:
         return bad("no_turn_reaches_min_length(best=%d)" % best_turn)
 
-    # Soft flags: no emoji-related flags at all.
     flags = []
 
     joined = "\n".join(aiko)

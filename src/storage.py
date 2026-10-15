@@ -97,6 +97,18 @@ def _get_or_create_release(tag: str) -> dict | None:
         return None
 
 
+def _is_already_exists_422(resp: requests.Response) -> bool:
+    """True only if 422 is the harmless 'asset already exists' case."""
+    try:
+        err = resp.json()
+    except Exception:
+        return False
+    for e in err.get("errors", []) or []:
+        if (e.get("code") or "").lower() == "already_exists":
+            return True
+    return False
+
+
 def upload_batch(records: list, tag_prefix: str = "batch") -> tuple[bool, str]:
     """Save locally, then upload as one asset (3 attempts). Returns (ok, url)."""
     import time as _time
@@ -125,9 +137,27 @@ def upload_batch(records: list, tag_prefix: str = "batch") -> tuple[bool, str]:
                 if r.status_code in (200, 201):
                     asset = r.json()
                     return True, asset.get("browser_download_url", release.get("html_url", ""))
+
                 if r.status_code == 422:
-                    return True, release.get("html_url", "")
-                logger.error("Asset upload failed (attempt %d): %s %s", attempt, r.status_code, r.text)
+                    # 422 has many causes. Only "already_exists" is safe to
+                    # treat as success. Anything else (bad name, too large,
+                    # validation failed) is a real failure -- retry / alert.
+                    if _is_already_exists_422(r):
+                        logger.info(
+                            "Asset %s already exists on GitHub (422 already_exists) -- OK",
+                            filename,
+                        )
+                        return True, release.get("html_url", "")
+                    logger.error(
+                        "Asset upload 422 (NOT already_exists) attempt %d: %s",
+                        attempt, r.text[:300],
+                    )
+                    # fall through and retry
+                else:
+                    logger.error(
+                        "Asset upload failed (attempt %d): %s %s",
+                        attempt, r.status_code, r.text[:300],
+                    )
             except (requests.RequestException, OSError) as exc:
                 logger.error("Exception uploading batch asset (attempt %d): %s", attempt, exc)
         if attempt < 3:
