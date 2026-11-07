@@ -8,7 +8,9 @@ from __future__ import annotations
 #   Slot 3 -> GEMINI_KEY_13..17
 #   Slot 4 -> GEMINI_KEY_18..22
 #   Slot 5 -> GEMINI_KEY_23..27
-SLOT_KEY_COUNTS = [6, 6, 5, 5, 5]
+#   Slot 6 -> GEMINI_KEY_28..33
+#   Slot 7 -> GEMINI_KEY_34..39
+SLOT_KEY_COUNTS = [6, 6, 5, 5, 5, 6, 6]
 
 MAX_KEY_INDEX = sum(SLOT_KEY_COUNTS)
 SLOT_COUNT = len(SLOT_KEY_COUNTS)

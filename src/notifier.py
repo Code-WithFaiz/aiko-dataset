@@ -129,14 +129,19 @@ def _build_stats_from_db() -> dict:
     today_total = today_by_tag["batch"] + today_by_tag["flagged"]
     recent_total = recent_by_tag["batch"] + recent_by_tag["flagged"]
 
-    progress = db.get_progress()
-    started_at = progress.get("started_at", now)
-    if isinstance(started_at, datetime):
-        if started_at.tzinfo is None:
-            started_at = started_at.replace(tzinfo=timezone.utc)
-        days_elapsed = max(1, (now - started_at).days + 1)
-    else:
-        days_elapsed = 1
+    try:
+        oldest_batch = database.batch_log.find_one(sort=[("created_at", 1)])
+        if oldest_batch and "created_at" in oldest_batch:
+            started_at = oldest_batch["created_at"]
+            if isinstance(started_at, datetime):
+                if started_at.tzinfo is None:
+                    started_at = started_at.replace(tzinfo=timezone.utc)
+        else:
+            started_at = now
+    except Exception:
+        started_at = now
+
+    days_elapsed = max(1, (now - started_at).days + 1)
 
     try:
         total_leaves = len(db.get_leaf_order() or [])

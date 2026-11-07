@@ -549,9 +549,6 @@ def _extract_text(response) -> str:
 def call_gemini(prompt: str, api_key: str, model: str = PRIMARY_MODEL) -> str:
     client = genai.Client(api_key=api_key)
     gen_config = {
-        "temperature": TEMPERATURE,
-        "top_p": TOP_P,
-        "top_k": TOP_K,
         "max_output_tokens": MAX_OUTPUT_TOKENS,
     }
 

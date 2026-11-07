@@ -1,4 +1,4 @@
-google-genai>=0.3.0
+google-genai>=2.0.0
 pymongo>=4.6
 dnspython>=2.4
 requests>=2.31

@@ -84,7 +84,7 @@ aiko-dataset/
 │   ├── dedup.py                # SHA256 hash + signature + opening similarity
 │   ├── db.py                   # MongoDB state manager
 │   ├── storage.py              # GitHub Releases uploader
-│   ├── key_rotator.py          # 30 Gemini keys, round-robin with cooldown
+│   ├── key_rotator.py          # 39 Gemini keys, round-robin with cooldown
 │   └── notifier.py             # daily email report + critical alerts
 │
 ├── scripts/
@@ -130,7 +130,7 @@ aiko-dataset/
 | `dedup.py` | Exact hash, signature Jaccard similarity, opening similarity, within-run phrase n-grams. |
 | `db.py` | MongoDB layer: run lock, leaf quotas, dedup buffers, key stats, batch log, notifier state. |
 | `storage.py` | Upload to GitHub Releases. Normal → per-day tag. Flagged → single fixed tag. |
-| `key_rotator.py` | 30 keys across 6 slots of 5. Round-robin, 90s cooldown on 429, dead tracking on 401/403. |
+| `key_rotator.py` | 39 keys across 7 slots. Round-robin, 90s cooldown on 429, dead tracking on 401/403. |
 | `notifier.py` | Daily email (once per 24h) + critical alerts (all keys dead). Zero Gemini calls. |
 
 ---
@@ -138,7 +138,7 @@ aiko-dataset/
 ## Key design decisions
 
 - **1 API call = 1 full conversation** (not per-turn) → ~10x throughput
-- **Temperature 0.9**, top_p 0.95, top_k 40, max_output_tokens 3000
+- **Sampling parameters removed** (temperature, top_p, top_k) as they are deprecated in Gemini 3.x models. `max_output_tokens` set to 4000.
 - **Variant picked at BUILD time** — the prompt receives one concrete variant,
   not a menu. Smaller prompt, no choice overload for the LLM.
 - **Turn count**: weighted random from `[8, 10, 12, 14, 16, 18, 20]`
@@ -146,7 +146,7 @@ aiko-dataset/
 - **Aiko's line length**: 4–5 lines per turn ideal, minimum 4.
 - **Emoji**: 1–4 per Aiko reply, spread through, never stacked, never only-emoji
 - **Dedup**: SHA256 + Jaccard signature > 0.90 + opening > 0.95 + phrase n-grams
-- **Concurrency**: 6 run-lock slots in MongoDB. Multiple GitHub runs can
+- **Concurrency**: 7 run-lock slots in MongoDB. Multiple GitHub runs can
   operate in parallel without corrupting state.
 - **Graceful shutdown**: at 52 min, current batch is flushed, lock released.
 - **No DB or release cleanup needed**: the DB stores only state. Deleting it
@@ -205,14 +205,14 @@ Direct fine-tuning ready. No post-processing needed.
 |---|---|
 | Total conversations | 600,000 |
 | Timeline | 90 days |
-| Daily target | ~6,700 |
+| Daily target | ~12,500 |
 | Run deadline | 52 min (before GitHub's 55 min cap) |
 | Batch upload threshold | 15 conversations |
 | Turn count per conversation | 8–20 (weighted, 12–16 most common) |
-| Concurrent runs | up to 6 (via MongoDB run-lock slots) |
-| API keys | 30 (6 slots × 5 keys) |
-| Success rate target | ≥ 85% |
-| Reject rate acceptable | up to 15% |
+| Concurrent runs | up to 7 (via MongoDB run-lock slots) |
+| API keys | 39 (various slots) |
+| Success rate target | ≥ 99.9% |
+| Reject rate acceptable | up to 0.1% |
 
 ---
 
@@ -232,21 +232,3 @@ Direct fine-tuning ready. No post-processing needed.
 - Email: amoungus111wiw@gmail.com
 - Report frequency: daily (auto)
 - Personality: Aiko (see `config/personality.md`)
-```
-
----
-
-## Kya badla — purane se
-
-| Section | Purana | Naya |
-|---|---|---|
-| Config files | scenarios.json, openers.json | aiko_axes, aiko_variety, aiko_tone_menu, endings, category_mapping |
-| Data flow | 4-step simple | Full detailed flow with validation + ChatML + 3 buckets |
-| Output format | Raw text | **ChatML** |
-| Key rotation | 8 keys | **30 keys, 6 slots** |
-| Folder structure | Reflected old files | Accurate to current state |
-| Design decisions | Old ones (temperature 1.1, batch 1000) | Updated (temperature 0.9, batch 15, tokens 3000) |
-| Quality gates | One line | Full breakdown of hard/auto/soft |
-| Security | Basic | Added hash note |
-
----
