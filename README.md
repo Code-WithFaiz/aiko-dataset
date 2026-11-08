@@ -84,7 +84,7 @@ aiko-dataset/
 │   ├── dedup.py                # SHA256 hash + signature + opening similarity
 │   ├── db.py                   # MongoDB state manager
 │   ├── storage.py              # GitHub Releases uploader
-│   ├── key_rotator.py          # 39 Gemini keys, round-robin with cooldown
+│   ├── key_rotator.py          # 36 Gemini keys, round-robin with cooldown
 │   └── notifier.py             # daily email report + critical alerts
 │
 ├── scripts/
@@ -130,7 +130,7 @@ aiko-dataset/
 | `dedup.py` | Exact hash, signature Jaccard similarity, opening similarity, within-run phrase n-grams. |
 | `db.py` | MongoDB layer: run lock, leaf quotas, dedup buffers, key stats, batch log, notifier state. |
 | `storage.py` | Upload to GitHub Releases. Normal → per-day tag. Flagged → single fixed tag. |
-| `key_rotator.py` | 39 keys across 7 slots. Round-robin, 90s cooldown on 429, dead tracking on 401/403. |
+| `key_rotator.py` | 36 keys across 7 slots. Round-robin, 90s cooldown on 429, dead tracking on 401/403. |
 | `notifier.py` | Daily email (once per 24h) + critical alerts (all keys dead). Zero Gemini calls. |
 
 ---
@@ -210,7 +210,7 @@ Direct fine-tuning ready. No post-processing needed.
 | Batch upload threshold | 15 conversations |
 | Turn count per conversation | 8–20 (weighted, 12–16 most common) |
 | Concurrent runs | up to 7 (via MongoDB run-lock slots) |
-| API keys | 39 (various slots) |
+| API keys | 36 (7 slots) |
 | Success rate target | ≥ 99.9% |
 | Reject rate acceptable | up to 0.1% |
 

@@ -11,12 +11,14 @@ SLOT_KEY_COUNTS (in src/constants.py) defines how many keys each slot
 gets. Slots are 1-based and consume keys sequentially: slot 1 gets the
 first N keys, slot 2 the next M, and so on.
 
-Current distribution (27 keys, 5 slots):
+Current distribution (36 keys, 7 slots):
   Slot 1 -> keys 1-6    (6 keys)
-  Slot 2 -> keys 7-12   (6 keys)
-  Slot 3 -> keys 13-17  (5 keys)
-  Slot 4 -> keys 18-22  (5 keys)
-  Slot 5 -> keys 23-27  (5 keys)
+  Slot 2 -> keys 7-11   (5 keys)
+  Slot 3 -> keys 12-16  (5 keys)
+  Slot 4 -> keys 17-21  (5 keys)
+  Slot 5 -> keys 22-26  (5 keys)
+  Slot 6 -> keys 27-31  (5 keys)
+  Slot 7 -> keys 32-36  (5 keys)
 
 CIRCUIT BREAKER
 ----------------
@@ -58,7 +60,7 @@ class KeyState:
 
 
 class KeyRotator:
-    """Round-robin rotator over a slice of GEMINI_KEY_1..GEMINI_KEY_27."""
+    """Round-robin rotator over a slice of GEMINI_KEY_1..GEMINI_KEY_36."""
 
     def __init__(self, keys: Optional[list[str]] = None) -> None:
         if keys is None:
